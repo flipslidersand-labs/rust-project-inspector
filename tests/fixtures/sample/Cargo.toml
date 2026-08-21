@@ -1,0 +1,10 @@
+# Standalone fixture crate for rpi-collect tests.
+# Intentionally NOT a member of the outer workspace.
+[package]
+name = "sample"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]

@@ -9,6 +9,7 @@ description = "Core types and traits for rust-project-inspector"
 
 [dependencies]
 serde = { workspace = true }
+syn = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
