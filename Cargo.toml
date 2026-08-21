@@ -25,3 +25,4 @@ anyhow = "1"
 syn = { version = "3", features = ["full", "visit"] }
 cargo_metadata = "0.18"
 petgraph = "0.6"
+toml = "0.8"

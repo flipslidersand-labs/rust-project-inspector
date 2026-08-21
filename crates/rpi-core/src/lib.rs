@@ -105,6 +105,32 @@ pub struct CrateData {
     pub files: Vec<SourceFile>,
 }
 
+/// Tunable thresholds, overridable via `rpi.toml` at the workspace root.
+///
+/// Uses `#[serde(default)]` so a partial `rpi.toml` only overrides the keys it
+/// names and everything else keeps its default.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
+pub struct Config {
+    /// A single file above this many lines is flagged by `module-size`.
+    pub module_size_loc: usize,
+    /// Per-crate `pub` item count above this is flagged by `pub-surface`.
+    pub pub_surface_warn: usize,
+    /// Per-crate unsafe items per 1k LOC above this is flagged by
+    /// `unsafe-surface`.
+    pub unsafe_density_warn: f64,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            module_size_loc: 300,
+            pub_surface_warn: 50,
+            unsafe_density_warn: 5.0,
+        }
+    }
+}
+
 /// Shared, already-parsed input handed to every [`Inspection`].
 ///
 /// `workspace` is the lightweight, serializable summary that also flows into
@@ -112,6 +138,7 @@ pub struct CrateData {
 pub struct Context {
     pub workspace: WorkspaceInfo,
     pub crates: Vec<CrateData>,
+    pub config: Config,
 }
 
 /// A single structural analysis. Implementations must be side-effect free and

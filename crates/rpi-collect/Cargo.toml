@@ -12,3 +12,4 @@ rpi-core = { workspace = true }
 anyhow = { workspace = true }
 syn = { workspace = true }
 cargo_metadata = { workspace = true }
+toml = { workspace = true }
