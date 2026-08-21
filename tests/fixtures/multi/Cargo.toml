@@ -1,0 +1,5 @@
+# Standalone multi-crate fixture workspace for acceptance tests.
+# Its own [workspace] isolates it from the outer rpi workspace.
+[workspace]
+resolver = "2"
+members = ["crates/fx_app", "crates/fx_lib"]

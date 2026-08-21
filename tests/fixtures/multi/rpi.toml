@@ -1,0 +1,5 @@
+# Low thresholds so the small fixture files deterministically trip inspections.
+# Doubles as coverage that rpi.toml overrides are honored.
+module_size_loc = 10
+pub_surface_warn = 2
+unsafe_density_warn = 0.1
