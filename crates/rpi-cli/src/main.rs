@@ -75,11 +75,24 @@ fn now_rfc3339_ish() -> String {
 }
 
 fn render_text(report: &Report) {
+    use rpi_core::Severity;
+
     println!("rust-project-inspector");
     println!("  root:     {}", report.workspace.root.display());
     println!("  crates:   {}", report.metrics.crate_count);
     println!("  findings: {}", report.metrics.finding_count);
+
     if report.findings.is_empty() {
-        println!("  (no findings — inspections land in #4/#5)");
+        println!("  (no findings)");
+        return;
+    }
+    for f in &report.findings {
+        let sev = match f.severity {
+            Severity::Error => "error",
+            Severity::Warn => "warn ",
+            Severity::Info => "info ",
+        };
+        let scope = f.location.krate.as_deref().unwrap_or("workspace");
+        println!("  [{sev}] {} ({}): {}", f.inspection, scope, f.message);
     }
 }

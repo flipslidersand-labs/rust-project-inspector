@@ -5,12 +5,16 @@
 
 use rpi_core::Inspection;
 
+mod workspace_graph;
+
+pub use workspace_graph::WorkspaceGraph;
+
 /// Return the set of inspections to run.
 ///
-/// Empty in P0; each subsequent issue registers its inspection here so the CLI
-/// and renderers need no changes as coverage grows.
+/// Each issue registers its inspection here so the CLI and renderers need no
+/// changes as coverage grows.
 pub fn all() -> Vec<Box<dyn Inspection>> {
-    Vec::new()
+    vec![Box::new(WorkspaceGraph)]
 }
 
 #[cfg(test)]
@@ -18,7 +22,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_starts_empty() {
-        assert_eq!(all().len(), 0);
+    fn registry_contains_workspace_graph() {
+        let names: Vec<_> = all().iter().map(|i| i.name()).collect();
+        assert!(names.contains(&"workspace-graph"));
     }
 }
