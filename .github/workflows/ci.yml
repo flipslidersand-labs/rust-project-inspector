@@ -24,3 +24,36 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: test
         run: cargo test --all
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Run tests with coverage
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+      - name: Coverage report to job summary
+        run: |
+          cargo llvm-cov report --summary-only 2>&1 | tee /tmp/cov_summary.txt || true
+          {
+            echo '## Coverage Report'
+            echo '```'
+            cat /tmp/cov_summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Warn (non-fatal) when line coverage falls below 75%.
+          line_cov=$(awk '/TOTAL/{gsub(/%/,"",$NF); print $NF; exit}' /tmp/cov_summary.txt)
+          if [ -n "$line_cov" ] && awk -v c="$line_cov" 'BEGIN{exit !(c+0 < 75)}'; then
+            echo "::warning::Line coverage ${line_cov}% is below the 75% threshold"
+          fi
+      - name: Upload lcov artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov
+          path: lcov.info
+          retention-days: 14
