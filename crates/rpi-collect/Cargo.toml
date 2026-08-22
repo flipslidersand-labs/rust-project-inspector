@@ -1,0 +1,12 @@
+[package]
+name = "rpi-collect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Workspace collection and AST parsing for rust-project-inspector"
+
+[dependencies]
+rpi-core = { workspace = true }
+anyhow = { workspace = true }

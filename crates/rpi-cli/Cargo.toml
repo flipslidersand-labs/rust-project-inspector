@@ -1,0 +1,20 @@
+[package]
+name = "rpi-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "CLI for rust-project-inspector"
+
+[[bin]]
+name = "rpi"
+path = "src/main.rs"
+
+[dependencies]
+rpi-core = { workspace = true }
+rpi-collect = { workspace = true }
+rpi-inspections = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }

@@ -1,0 +1,11 @@
+[package]
+name = "rpi-inspections"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Structural inspections for rust-project-inspector"
+
+[dependencies]
+rpi-core = { workspace = true }
