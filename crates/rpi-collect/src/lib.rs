@@ -8,22 +8,33 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use std::process::Command;
+
 use anyhow::{Context as _, Result};
 use cargo_metadata::MetadataCommand;
-use rpi_core::{Config, Context, CrateData, SourceFile, WorkspaceInfo};
+use rpi_core::{AuditVuln, Config, Context, CrateData, SourceFile, WorkspaceInfo};
+
+/// Options controlling optional, potentially-slow collection steps.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CollectOptions {
+    /// Run `cargo audit --json` and populate [`Context::audit`]. Off by default
+    /// so a normal `rpi inspect` stays fast and network-free.
+    pub run_audit: bool,
+}
 
 /// Build a [`Context`] for the workspace rooted at `root`.
 ///
 /// Files that fail to parse are skipped with a warning on stderr so a single
 /// bad file never aborts the whole run.
-pub fn collect(root: &Path) -> Result<Context> {
+pub fn collect(root: &Path, opts: CollectOptions) -> Result<Context> {
+    // Full metadata (deps resolved) so `dep-hygiene` can inspect the whole
+    // graph for duplicate versions.
     let metadata = MetadataCommand::new()
         .current_dir(root)
-        .no_deps()
         .exec()
         .context("failed to run `cargo metadata`")?;
 
-    // Names of workspace members, used to keep only intra-workspace deps.
+    // Names of workspace members, used to split intra- vs external deps.
     let member_names: BTreeSet<String> = metadata
         .workspace_packages()
         .iter()
@@ -38,12 +49,15 @@ pub fn collect(root: &Path) -> Result<Context> {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| root.to_path_buf());
 
-        let workspace_deps = pkg
-            .dependencies
-            .iter()
-            .map(|d| d.name.clone())
-            .filter(|name| member_names.contains(name))
-            .collect();
+        let mut workspace_deps = Vec::new();
+        let mut external_deps = Vec::new();
+        for dep in &pkg.dependencies {
+            if member_names.contains(&dep.name) {
+                workspace_deps.push(dep.name.clone());
+            } else if dep.kind == cargo_metadata::DependencyKind::Normal {
+                external_deps.push(dep.name.clone());
+            }
+        }
 
         let files = collect_rs_files(&root_dir)
             .into_iter()
@@ -55,12 +69,24 @@ pub fn collect(root: &Path) -> Result<Context> {
             manifest_path,
             root_dir,
             workspace_deps,
+            external_deps,
             files,
         });
     }
 
+    let resolved_versions = metadata
+        .packages
+        .iter()
+        .map(|p| (p.name.to_string(), p.version.to_string()))
+        .collect();
+
     let root_dir = metadata.workspace_root.clone().into_std_path_buf();
     let config = load_config(&root_dir);
+    let audit = if opts.run_audit {
+        run_cargo_audit(&root_dir)
+    } else {
+        Vec::new()
+    };
 
     let workspace = WorkspaceInfo {
         root: root_dir,
@@ -71,7 +97,64 @@ pub fn collect(root: &Path) -> Result<Context> {
         workspace,
         crates,
         config,
+        resolved_versions,
+        audit,
     })
+}
+
+/// Run `cargo audit --json` at `root` and parse advisories. Best-effort: if the
+/// binary is missing or the command fails, warn once and return no vulns rather
+/// than aborting the inspection.
+fn run_cargo_audit(root: &Path) -> Vec<AuditVuln> {
+    let output = Command::new("cargo")
+        .args(["audit", "--json"])
+        .current_dir(root)
+        .output();
+    match output {
+        Ok(out) if !out.stdout.is_empty() => {
+            parse_audit_json(&String::from_utf8_lossy(&out.stdout))
+        }
+        Ok(_) => Vec::new(),
+        Err(e) => {
+            eprintln!("warn: `cargo audit` unavailable ({e}); skipping audit-bridge");
+            Vec::new()
+        }
+    }
+}
+
+/// Parse the `cargo audit --json` document into [`AuditVuln`]s. Tolerant of
+/// missing fields so schema drift degrades gracefully.
+fn parse_audit_json(text: &str) -> Vec<AuditVuln> {
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Vec::new();
+    };
+    let list = doc
+        .get("vulnerabilities")
+        .and_then(|v| v.get("list"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    list.iter()
+        .map(|v| {
+            let s = |ptr: &[&str]| -> String {
+                let mut cur = v;
+                for k in ptr {
+                    match cur.get(k) {
+                        Some(next) => cur = next,
+                        None => return String::new(),
+                    }
+                }
+                cur.as_str().unwrap_or("").to_string()
+            };
+            AuditVuln {
+                id: s(&["advisory", "id"]),
+                package: s(&["package", "name"]),
+                version: s(&["package", "version"]),
+                title: s(&["advisory", "title"]),
+            }
+        })
+        .collect()
 }
 
 /// Load `rpi.toml` from the workspace root, falling back to defaults when the
@@ -154,7 +237,7 @@ mod tests {
 
     #[test]
     fn collects_fixture_crate_and_parses_sources() {
-        let ctx = collect(&fixture()).unwrap();
+        let ctx = collect(&fixture(), CollectOptions::default()).unwrap();
         assert_eq!(ctx.workspace.crates, vec!["sample".to_string()]);
 
         let krate = &ctx.crates[0];
@@ -177,5 +260,27 @@ mod tests {
                 .all(|p| !p.components().any(|c| c.as_os_str() == "target")),
             "target/ must be excluded"
         );
+    }
+
+    #[test]
+    fn parses_cargo_audit_json() {
+        let json = r#"{
+            "vulnerabilities": { "count": 1, "list": [
+                { "advisory": { "id": "RUSTSEC-2021-0001", "title": "boom" },
+                  "package": { "name": "badcrate", "version": "1.2.3" } }
+            ]}
+        }"#;
+        let vulns = parse_audit_json(json);
+        assert_eq!(vulns.len(), 1);
+        assert_eq!(vulns[0].id, "RUSTSEC-2021-0001");
+        assert_eq!(vulns[0].package, "badcrate");
+        assert_eq!(vulns[0].version, "1.2.3");
+        assert_eq!(vulns[0].title, "boom");
+    }
+
+    #[test]
+    fn audit_json_tolerates_empty_and_garbage() {
+        assert!(parse_audit_json("not json").is_empty());
+        assert!(parse_audit_json("{}").is_empty());
     }
 }

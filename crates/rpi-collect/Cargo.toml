@@ -13,3 +13,4 @@ anyhow = { workspace = true }
 syn = { workspace = true }
 cargo_metadata = { workspace = true }
 toml = { workspace = true }
+serde_json = { workspace = true }

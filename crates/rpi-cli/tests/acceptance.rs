@@ -16,7 +16,7 @@ fn fixture() -> PathBuf {
 }
 
 fn run() -> Vec<Finding> {
-    let ctx = rpi_collect::collect(&fixture()).expect("collect fixture");
+    let ctx = rpi_collect::collect(&fixture(), Default::default()).expect("collect fixture");
     rpi_inspections::all()
         .iter()
         .flat_map(|i| i.run(&ctx))
@@ -31,7 +31,7 @@ fn has(findings: &[Finding], inspection: &str, krate: &str) -> bool {
 
 #[test]
 fn collects_both_member_crates() {
-    let ctx = rpi_collect::collect(&fixture()).unwrap();
+    let ctx = rpi_collect::collect(&fixture(), Default::default()).unwrap();
     let mut names = ctx.workspace.crates.clone();
     names.sort();
     assert_eq!(names, vec!["fx_app".to_string(), "fx_lib".to_string()]);

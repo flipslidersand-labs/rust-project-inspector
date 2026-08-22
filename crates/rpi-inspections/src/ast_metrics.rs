@@ -292,6 +292,7 @@ mod tests {
             manifest_path: PathBuf::from(format!("/w/{name}/Cargo.toml")),
             root_dir: PathBuf::from(format!("/w/{name}")),
             workspace_deps: Vec::new(),
+            external_deps: Vec::new(),
             files,
         }
     }
@@ -301,6 +302,8 @@ mod tests {
             workspace: WorkspaceInfo::default(),
             crates,
             config,
+            resolved_versions: Vec::new(),
+            audit: Vec::new(),
         }
     }
 

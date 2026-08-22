@@ -39,6 +39,11 @@ enum Command {
         /// Omit to always exit 0 (report-only).
         #[arg(long, value_enum)]
         fail_on: Option<FailLevel>,
+
+        /// Run `cargo audit` and include RustSec advisories (audit-bridge).
+        /// Requires cargo-audit installed; off by default.
+        #[arg(long)]
+        audit: bool,
     },
 }
 
@@ -63,12 +68,14 @@ fn main() -> Result<()> {
             path,
             format,
             fail_on,
-        } => inspect(path, format, fail_on),
+            audit,
+        } => inspect(path, format, fail_on, audit),
     }
 }
 
-fn inspect(path: PathBuf, format: Format, fail_on: Option<FailLevel>) -> Result<()> {
-    let ctx = rpi_collect::collect(&path)?;
+fn inspect(path: PathBuf, format: Format, fail_on: Option<FailLevel>, audit: bool) -> Result<()> {
+    let opts = rpi_collect::CollectOptions { run_audit: audit };
+    let ctx = rpi_collect::collect(&path, opts)?;
 
     let findings = rpi_inspections::all()
         .iter()

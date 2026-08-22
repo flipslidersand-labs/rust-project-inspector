@@ -102,7 +102,19 @@ pub struct CrateData {
     /// Names of other workspace members this crate depends on (for the
     /// dependency graph). External deps are intentionally excluded.
     pub workspace_deps: Vec<String>,
+    /// Names of declared, normal-kind external dependencies (for
+    /// `dep-hygiene`'s unused-dependency check).
+    pub external_deps: Vec<String>,
     pub files: Vec<SourceFile>,
+}
+
+/// One RustSec advisory hit, surfaced by `audit-bridge` from `cargo audit`.
+#[derive(Debug, Clone)]
+pub struct AuditVuln {
+    pub id: String,
+    pub package: String,
+    pub version: String,
+    pub title: String,
 }
 
 /// Tunable thresholds, overridable via `rpi.toml` at the workspace root.
@@ -119,6 +131,9 @@ pub struct Config {
     /// Per-crate unsafe items per 1k LOC above this is flagged by
     /// `unsafe-surface`.
     pub unsafe_density_warn: f64,
+    /// A single file importing more than this many distinct crate roots is
+    /// flagged by `coupling` as a highly-coupled ("God") module.
+    pub coupling_warn: usize,
 }
 
 impl Default for Config {
@@ -127,6 +142,7 @@ impl Default for Config {
             module_size_loc: 300,
             pub_surface_warn: 50,
             unsafe_density_warn: 5.0,
+            coupling_warn: 20,
         }
     }
 }
@@ -139,6 +155,11 @@ pub struct Context {
     pub workspace: WorkspaceInfo,
     pub crates: Vec<CrateData>,
     pub config: Config,
+    /// Every package `(name, version)` in the resolved dependency graph, used
+    /// by `dep-hygiene` to detect the same crate resolved to multiple versions.
+    pub resolved_versions: Vec<(String, String)>,
+    /// RustSec advisories, populated only when audit collection is enabled.
+    pub audit: Vec<AuditVuln>,
 }
 
 /// A single structural analysis. Implementations must be side-effect free and
