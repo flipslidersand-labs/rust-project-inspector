@@ -10,3 +10,5 @@ description = "Workspace collection and AST parsing for rust-project-inspector"
 [dependencies]
 rpi-core = { workspace = true }
 anyhow = { workspace = true }
+syn = { workspace = true }
+cargo_metadata = { workspace = true }

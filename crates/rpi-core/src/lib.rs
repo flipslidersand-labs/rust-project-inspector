@@ -83,13 +83,35 @@ impl Report {
     }
 }
 
+/// One parsed source file. The AST is parsed once by `rpi-collect` and shared;
+/// inspections must never re-parse.
+pub struct SourceFile {
+    pub path: PathBuf,
+    /// Physical line count of the file.
+    pub loc: usize,
+    /// Parsed syntax tree.
+    pub ast: syn::File,
+}
+
+/// A single workspace-member crate with its parsed sources.
+pub struct CrateData {
+    pub name: String,
+    pub manifest_path: PathBuf,
+    /// Directory containing the crate's `Cargo.toml`.
+    pub root_dir: PathBuf,
+    /// Names of other workspace members this crate depends on (for the
+    /// dependency graph). External deps are intentionally excluded.
+    pub workspace_deps: Vec<String>,
+    pub files: Vec<SourceFile>,
+}
+
 /// Shared, already-parsed input handed to every [`Inspection`].
 ///
-/// P0 keeps this minimal; `rpi-collect` (#3) populates the parsed-AST map so
-/// inspections never re-parse source.
-#[derive(Debug, Clone, Default)]
+/// `workspace` is the lightweight, serializable summary that also flows into
+/// [`Report`]; `crates` carries the heavy parsed ASTs and is analysis-only.
 pub struct Context {
     pub workspace: WorkspaceInfo,
+    pub crates: Vec<CrateData>,
 }
 
 /// A single structural analysis. Implementations must be side-effect free and
