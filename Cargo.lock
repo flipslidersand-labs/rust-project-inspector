@@ -241,6 +241,7 @@ dependencies = [
  "anyhow",
  "cargo_metadata",
  "rpi-core",
+ "serde_json",
  "syn 3.0.3",
  "toml",
 ]
