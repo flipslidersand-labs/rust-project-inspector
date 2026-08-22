@@ -34,15 +34,12 @@ impl Inspection for AuditBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rpi_core::{AuditVuln, Config, WorkspaceInfo};
+    use rpi_core::AuditVuln;
 
     fn ctx(audit: Vec<AuditVuln>) -> Context {
         Context {
-            workspace: WorkspaceInfo::default(),
-            crates: Vec::new(),
-            config: Config::default(),
-            resolved_versions: Vec::new(),
             audit,
+            ..Default::default()
         }
     }
 

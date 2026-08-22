@@ -104,7 +104,7 @@ fn isolated_findings(graph: &DiGraph<String, ()>) -> Vec<Finding> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rpi_core::{CrateData, WorkspaceInfo};
+    use rpi_core::CrateData;
     use std::path::PathBuf;
 
     fn krate(name: &str, deps: &[&str]) -> CrateData {
@@ -120,11 +120,8 @@ mod tests {
 
     fn ctx(crates: Vec<CrateData>) -> Context {
         Context {
-            workspace: WorkspaceInfo::default(),
             crates,
-            config: rpi_core::Config::default(),
-            resolved_versions: Vec::new(),
-            audit: Vec::new(),
+            ..Default::default()
         }
     }
 

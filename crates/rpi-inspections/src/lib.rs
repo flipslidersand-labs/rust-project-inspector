@@ -7,6 +7,8 @@ use rpi_core::Inspection;
 
 mod ast_metrics;
 mod audit_bridge;
+mod churn_hotspot;
+mod complexity;
 mod coupling;
 mod dep_hygiene;
 mod imports;
@@ -14,6 +16,8 @@ mod workspace_graph;
 
 pub use ast_metrics::{ModuleSize, PubSurface, TestGap, UnsafeSurface};
 pub use audit_bridge::AuditBridge;
+pub use churn_hotspot::ChurnHotspot;
+pub use complexity::Complexity;
 pub use coupling::Coupling;
 pub use dep_hygiene::DepHygiene;
 pub use workspace_graph::WorkspaceGraph;
@@ -32,6 +36,8 @@ pub fn all() -> Vec<Box<dyn Inspection>> {
         Box::new(DepHygiene),
         Box::new(Coupling),
         Box::new(AuditBridge),
+        Box::new(Complexity),
+        Box::new(ChurnHotspot),
     ]
 }
 
@@ -51,6 +57,8 @@ mod tests {
             "dep-hygiene",
             "coupling",
             "audit-bridge",
+            "complexity",
+            "churn-hotspot",
         ] {
             assert!(names.contains(&expected), "missing {expected}");
         }

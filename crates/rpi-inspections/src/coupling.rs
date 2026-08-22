@@ -50,7 +50,7 @@ impl Inspection for Coupling {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rpi_core::{Config, CrateData, SourceFile, WorkspaceInfo};
+    use rpi_core::{Config, CrateData, SourceFile};
     use std::path::PathBuf;
 
     fn ctx_one_file(src: &str, warn: usize) -> Context {
@@ -67,14 +67,12 @@ mod tests {
             }],
         };
         Context {
-            workspace: WorkspaceInfo::default(),
             crates: vec![krate],
             config: Config {
                 coupling_warn: warn,
                 ..Default::default()
             },
-            resolved_versions: Vec::new(),
-            audit: Vec::new(),
+            ..Default::default()
         }
     }
 
