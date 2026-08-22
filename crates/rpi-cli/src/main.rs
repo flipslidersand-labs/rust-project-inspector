@@ -10,6 +10,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use rpi_core::Report;
 
+mod render;
+
 #[derive(Parser)]
 #[command(
     name = "rpi",
@@ -59,8 +61,8 @@ fn inspect(path: PathBuf, format: Format) -> Result<()> {
     let report = Report::new(ctx.workspace, findings, now_rfc3339_ish());
 
     match format {
-        Format::Json => println!("{}", serde_json::to_string_pretty(&report)?),
-        Format::Text => render_text(&report),
+        Format::Json => println!("{}", render::json(&report)?),
+        Format::Text => print!("{}", render::text(&report)),
     }
     Ok(())
 }
@@ -72,27 +74,4 @@ fn now_rfc3339_ish() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("unix:{secs}")
-}
-
-fn render_text(report: &Report) {
-    use rpi_core::Severity;
-
-    println!("rust-project-inspector");
-    println!("  root:     {}", report.workspace.root.display());
-    println!("  crates:   {}", report.metrics.crate_count);
-    println!("  findings: {}", report.metrics.finding_count);
-
-    if report.findings.is_empty() {
-        println!("  (no findings)");
-        return;
-    }
-    for f in &report.findings {
-        let sev = match f.severity {
-            Severity::Error => "error",
-            Severity::Warn => "warn ",
-            Severity::Info => "info ",
-        };
-        let scope = f.location.krate.as_deref().unwrap_or("workspace");
-        println!("  [{sev}] {} ({}): {}", f.inspection, scope, f.message);
-    }
 }
