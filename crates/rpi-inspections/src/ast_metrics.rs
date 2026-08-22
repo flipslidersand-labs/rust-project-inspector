@@ -274,7 +274,7 @@ impl Inspection for TestGap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rpi_core::{Config, WorkspaceInfo};
+    use rpi_core::Config;
     use std::path::PathBuf;
 
     fn krate_from_src(name: &str, srcs: &[&str]) -> CrateData {
@@ -299,11 +299,9 @@ mod tests {
 
     fn ctx_with(config: Config, crates: Vec<CrateData>) -> Context {
         Context {
-            workspace: WorkspaceInfo::default(),
             crates,
             config,
-            resolved_versions: Vec::new(),
-            audit: Vec::new(),
+            ..Default::default()
         }
     }
 

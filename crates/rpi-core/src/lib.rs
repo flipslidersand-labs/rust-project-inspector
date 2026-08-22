@@ -134,6 +134,12 @@ pub struct Config {
     /// A single file importing more than this many distinct crate roots is
     /// flagged by `coupling` as a highly-coupled ("God") module.
     pub coupling_warn: usize,
+    /// A function whose cyclomatic complexity exceeds this is flagged by
+    /// `complexity`.
+    pub complexity_warn: usize,
+    /// A file changed at least this many times (git history) *and* over
+    /// `complexity_warn` total complexity is flagged by `churn-hotspot`.
+    pub churn_warn: usize,
 }
 
 impl Default for Config {
@@ -143,6 +149,8 @@ impl Default for Config {
             pub_surface_warn: 50,
             unsafe_density_warn: 5.0,
             coupling_warn: 20,
+            complexity_warn: 10,
+            churn_warn: 5,
         }
     }
 }
@@ -151,6 +159,10 @@ impl Default for Config {
 ///
 /// `workspace` is the lightweight, serializable summary that also flows into
 /// [`Report`]; `crates` carries the heavy parsed ASTs and is analysis-only.
+///
+/// Derives [`Default`] so tests and future fields compose via
+/// `Context { crates, ..Default::default() }`.
+#[derive(Default)]
 pub struct Context {
     pub workspace: WorkspaceInfo,
     pub crates: Vec<CrateData>,
@@ -160,6 +172,9 @@ pub struct Context {
     pub resolved_versions: Vec<(String, String)>,
     /// RustSec advisories, populated only when audit collection is enabled.
     pub audit: Vec<AuditVuln>,
+    /// Per-file git change counts (commits touching the file), used by
+    /// `churn-hotspot`. Empty when the workspace is not a git repo.
+    pub churn: std::collections::HashMap<PathBuf, usize>,
 }
 
 /// A single structural analysis. Implementations must be side-effect free and

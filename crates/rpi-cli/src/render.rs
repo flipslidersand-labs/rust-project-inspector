@@ -78,6 +78,25 @@ pub fn sarif(report: &Report) -> Result<String> {
     Ok(serde_json::to_string_pretty(&doc)?)
 }
 
+/// Compare the current report against a previously-saved JSON report and
+/// describe the trend. `baseline` is the parsed prior report (any shape tolerated
+/// via `serde_json::Value`).
+pub fn trend(current: &Report, baseline: &serde_json::Value) -> String {
+    let cur = current.metrics.finding_count as i64;
+    let base = baseline
+        .get("metrics")
+        .and_then(|m| m.get("finding_count"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let delta = cur - base;
+    let (arrow, verdict) = match delta.cmp(&0) {
+        std::cmp::Ordering::Greater => ("▲", "regression"),
+        std::cmp::Ordering::Less => ("▼", "improvement"),
+        std::cmp::Ordering::Equal => ("=", "no change"),
+    };
+    format!("trend: findings {base} → {cur} ({delta:+}) {arrow} {verdict}")
+}
+
 fn sarif_level(sev: Severity) -> &'static str {
     match sev {
         Severity::Error => "error",
@@ -247,6 +266,19 @@ mod tests {
         let s = json(&report(vec![finding("x", Severity::Info, "k")])).unwrap();
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["findings"][0]["inspection"], "x");
+    }
+
+    #[test]
+    fn trend_detects_regression_and_improvement() {
+        let cur = report(vec![
+            finding("a", Severity::Warn, "k"),
+            finding("b", Severity::Warn, "k"),
+        ]);
+        let base_more: serde_json::Value = serde_json::json!({"metrics":{"finding_count":5}});
+        let base_less: serde_json::Value = serde_json::json!({"metrics":{"finding_count":0}});
+        assert!(trend(&cur, &base_more).contains("improvement"));
+        assert!(trend(&cur, &base_less).contains("regression"));
+        assert!(trend(&cur, &base_less).contains("(+2)"));
     }
 
     #[test]

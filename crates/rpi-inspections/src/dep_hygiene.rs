@@ -83,7 +83,7 @@ impl Inspection for DepHygiene {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rpi_core::{Config, CrateData, SourceFile, WorkspaceInfo};
+    use rpi_core::{CrateData, SourceFile};
     use std::path::PathBuf;
 
     fn krate(name: &str, ext_deps: &[&str], src: &str) -> CrateData {
@@ -103,14 +103,12 @@ mod tests {
 
     fn ctx(crates: Vec<CrateData>, resolved: &[(&str, &str)]) -> Context {
         Context {
-            workspace: WorkspaceInfo::default(),
             crates,
-            config: Config::default(),
             resolved_versions: resolved
                 .iter()
                 .map(|(n, v)| (n.to_string(), v.to_string()))
                 .collect(),
-            audit: Vec::new(),
+            ..Default::default()
         }
     }
 

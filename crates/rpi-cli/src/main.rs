@@ -44,6 +44,11 @@ enum Command {
         /// Requires cargo-audit installed; off by default.
         #[arg(long)]
         audit: bool,
+
+        /// Compare against a previously-saved JSON report and print the trend
+        /// (regression/improvement) to stderr.
+        #[arg(long, value_name = "FILE.json")]
+        baseline: Option<PathBuf>,
     },
 }
 
@@ -69,11 +74,18 @@ fn main() -> Result<()> {
             format,
             fail_on,
             audit,
-        } => inspect(path, format, fail_on, audit),
+            baseline,
+        } => inspect(path, format, fail_on, audit, baseline),
     }
 }
 
-fn inspect(path: PathBuf, format: Format, fail_on: Option<FailLevel>, audit: bool) -> Result<()> {
+fn inspect(
+    path: PathBuf,
+    format: Format,
+    fail_on: Option<FailLevel>,
+    audit: bool,
+    baseline: Option<PathBuf>,
+) -> Result<()> {
     let opts = rpi_collect::CollectOptions { run_audit: audit };
     let ctx = rpi_collect::collect(&path, opts)?;
 
@@ -90,12 +102,25 @@ fn inspect(path: PathBuf, format: Format, fail_on: Option<FailLevel>, audit: boo
         Format::Text => print!("{}", render::text(&report)),
     }
 
+    // Trend goes to stderr so it never pollutes machine-readable stdout.
+    if let Some(path) = baseline {
+        match load_json(&path) {
+            Ok(prior) => eprintln!("{}", render::trend(&report, &prior)),
+            Err(e) => eprintln!("warn: could not read baseline {}: {e}", path.display()),
+        }
+    }
+
     if let Some(level) = fail_on {
         if should_fail(&report, level) {
             std::process::exit(1);
         }
     }
     Ok(())
+}
+
+fn load_json(path: &std::path::Path) -> Result<serde_json::Value> {
+    let text = std::fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&text)?)
 }
 
 /// Whether any finding meets or exceeds the `--fail-on` threshold.

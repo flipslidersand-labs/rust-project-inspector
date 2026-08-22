@@ -4,10 +4,9 @@
 //! file belonging to each member crate, and parses each file **once** with
 //! `syn`. Inspections then read the shared [`Context`] without re-parsing.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-
 use std::process::Command;
 
 use anyhow::{Context as _, Result};
@@ -87,6 +86,7 @@ pub fn collect(root: &Path, opts: CollectOptions) -> Result<Context> {
     } else {
         Vec::new()
     };
+    let churn = collect_churn(&root_dir);
 
     let workspace = WorkspaceInfo {
         root: root_dir,
@@ -99,7 +99,53 @@ pub fn collect(root: &Path, opts: CollectOptions) -> Result<Context> {
         config,
         resolved_versions,
         audit,
+        churn,
     })
+}
+
+/// Count how many commits touched each `.rs` file, via `git log --name-only`.
+/// Best-effort: returns empty when the root is not a git repo or git is absent.
+fn collect_churn(root: &Path) -> HashMap<PathBuf, usize> {
+    let output = Command::new("git")
+        .args(["-C"])
+        .arg(root)
+        .args(["log", "--name-only", "--pretty=format:"])
+        .output();
+    let Ok(out) = output else {
+        return HashMap::new();
+    };
+    if !out.status.success() {
+        return HashMap::new();
+    }
+    // git prints paths relative to the repo toplevel, which may differ from the
+    // workspace root; anchor against the toplevel so keys are absolute and match
+    // the paths inspections carry.
+    let anchor = git_toplevel(root).unwrap_or_else(|| root.to_path_buf());
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut churn: HashMap<PathBuf, usize> = HashMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || !line.ends_with(".rs") {
+            continue;
+        }
+        *churn.entry(anchor.join(line)).or_insert(0) += 1;
+    }
+    churn
+}
+
+/// Absolute path of the git repository root containing `dir`, if any.
+fn git_toplevel(dir: &Path) -> Option<PathBuf> {
+    let out = Command::new("git")
+        .args(["-C"])
+        .arg(dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let top = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!top.is_empty()).then(|| PathBuf::from(top))
 }
 
 /// Run `cargo audit --json` at `root` and parse advisories. Best-effort: if the
