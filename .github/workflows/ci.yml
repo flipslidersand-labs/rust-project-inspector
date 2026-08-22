@@ -24,3 +24,16 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: test
         run: cargo test --all
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Security audit
+        # Fails on any unignored RustSec advisory. Add known-acceptable IDs to
+        # audit.toml [advisories] ignore = [...] rather than silencing the job.
+        run: cargo audit
