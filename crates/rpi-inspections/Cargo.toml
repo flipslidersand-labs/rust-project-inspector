@@ -10,3 +10,4 @@ description = "Structural inspections for rust-project-inspector"
 [dependencies]
 rpi-core = { workspace = true }
 petgraph = { workspace = true }
+syn = { workspace = true }

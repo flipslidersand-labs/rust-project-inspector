@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use cargo_metadata::MetadataCommand;
-use rpi_core::{Context, CrateData, SourceFile, WorkspaceInfo};
+use rpi_core::{Config, Context, CrateData, SourceFile, WorkspaceInfo};
 
 /// Build a [`Context`] for the workspace rooted at `root`.
 ///
@@ -59,12 +59,36 @@ pub fn collect(root: &Path) -> Result<Context> {
         });
     }
 
+    let root_dir = metadata.workspace_root.clone().into_std_path_buf();
+    let config = load_config(&root_dir);
+
     let workspace = WorkspaceInfo {
-        root: metadata.workspace_root.clone().into_std_path_buf(),
+        root: root_dir,
         crates: crates.iter().map(|c| c.name.clone()).collect(),
     };
 
-    Ok(Context { workspace, crates })
+    Ok(Context {
+        workspace,
+        crates,
+        config,
+    })
+}
+
+/// Load `rpi.toml` from the workspace root, falling back to defaults when the
+/// file is absent or unreadable. A malformed file warns and uses defaults
+/// rather than aborting the run.
+fn load_config(root: &Path) -> Config {
+    let path = root.join("rpi.toml");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Config::default();
+    };
+    match toml::from_str(&text) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("warn: ignoring {} (parse error: {e})", path.display());
+            Config::default()
+        }
+    }
 }
 
 /// Recursively gather `.rs` files under `dir`, skipping any `target/` output.

@@ -121,6 +121,7 @@ mod tests {
         Context {
             workspace: WorkspaceInfo::default(),
             crates,
+            config: rpi_core::Config::default(),
         }
     }
 
