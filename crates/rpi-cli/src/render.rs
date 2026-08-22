@@ -18,6 +18,74 @@ pub fn json(report: &Report) -> Result<String> {
     Ok(serde_json::to_string_pretty(report)?)
 }
 
+/// SARIF 2.1.0 for GitHub Code Scanning.
+///
+/// File paths are emitted relative to the workspace root so GitHub can anchor
+/// results to the repository tree; crate-scoped findings without a file are
+/// reported without a physical location (GitHub shows them at the repo root).
+pub fn sarif(report: &Report) -> Result<String> {
+    use serde_json::json;
+
+    // One rule per distinct inspection that produced a finding.
+    let mut rule_ids: Vec<&str> = report.findings.iter().map(|f| f.inspection).collect();
+    rule_ids.sort_unstable();
+    rule_ids.dedup();
+    let rules: Vec<_> = rule_ids
+        .iter()
+        .map(|id| json!({ "id": id, "name": id }))
+        .collect();
+
+    let root = &report.workspace.root;
+    let results: Vec<_> = report
+        .findings
+        .iter()
+        .map(|f| {
+            let mut result = json!({
+                "ruleId": f.inspection,
+                "level": sarif_level(f.severity),
+                "message": { "text": f.message },
+            });
+            if let Some(file) = &f.location.file {
+                let uri = file
+                    .strip_prefix(root)
+                    .unwrap_or(file)
+                    .display()
+                    .to_string();
+                let line = f.location.span.map(|(s, _)| s).unwrap_or(1).max(1);
+                result["locations"] = json!([{
+                    "physicalLocation": {
+                        "artifactLocation": { "uri": uri },
+                        "region": { "startLine": line }
+                    }
+                }]);
+            }
+            result
+        })
+        .collect();
+
+    let doc = json!({
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": { "driver": {
+                "name": "rust-project-inspector",
+                "informationUri": "https://github.com/flipslidersand/rust-project-inspector",
+                "rules": rules,
+            }},
+            "results": results,
+        }],
+    });
+    Ok(serde_json::to_string_pretty(&doc)?)
+}
+
+fn sarif_level(sev: Severity) -> &'static str {
+    match sev {
+        Severity::Error => "error",
+        Severity::Warn => "warning",
+        Severity::Info => "note",
+    }
+}
+
 pub fn text(report: &Report) -> String {
     let mut out = String::new();
     let m = &report.metrics;
@@ -179,5 +247,64 @@ mod tests {
         let s = json(&report(vec![finding("x", Severity::Info, "k")])).unwrap();
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["findings"][0]["inspection"], "x");
+    }
+
+    #[test]
+    fn sarif_shape_and_level_mapping() {
+        let r = report(vec![
+            finding("workspace-graph", Severity::Error, "a"),
+            finding("test-gap", Severity::Warn, "b"),
+        ]);
+        let v: serde_json::Value = serde_json::from_str(&sarif(&r).unwrap()).unwrap();
+        assert_eq!(v["version"], "2.1.0");
+        assert_eq!(
+            v["runs"][0]["tool"]["driver"]["name"],
+            "rust-project-inspector"
+        );
+        let results = v["runs"][0]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["level"], "error");
+        assert_eq!(results[1]["level"], "warning");
+        // Two distinct inspections → two rules.
+        assert_eq!(
+            v["runs"][0]["tool"]["driver"]["rules"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn sarif_emits_relative_file_uri() {
+        use rpi_core::WorkspaceInfo;
+        use std::path::PathBuf;
+        let f = Finding {
+            inspection: "module-size",
+            severity: Severity::Warn,
+            location: Location {
+                krate: Some("k".into()),
+                file: Some(PathBuf::from("/repo/crates/k/src/big.rs")),
+                span: None,
+            },
+            message: "big".into(),
+            metric: None,
+        };
+        let r = Report {
+            workspace: WorkspaceInfo {
+                root: PathBuf::from("/repo"),
+                crates: vec!["k".into()],
+            },
+            metrics: rpi_core::Metrics {
+                crate_count: 1,
+                finding_count: 1,
+            },
+            findings: vec![f],
+            generated_at: "t".into(),
+        };
+        let v: serde_json::Value = serde_json::from_str(&sarif(&r).unwrap()).unwrap();
+        let uri = &v["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
+            ["artifactLocation"]["uri"];
+        assert_eq!(uri, "crates/k/src/big.rs");
     }
 }

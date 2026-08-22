@@ -1,0 +1,44 @@
+name: Structural Inspection
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Required for github/codeql-action/upload-sarif to publish results.
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build rpi
+        run: cargo build --release -p rpi-cli
+
+      - name: Run structural inspection (SARIF)
+        # Report-only: never fail the job here — findings surface in the
+        # Security tab. Use `--fail-on warn` instead to gate a PR.
+        run: ./target/release/rpi inspect . --format sarif > rpi.sarif
+
+      - name: Upload SARIF artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpi-sarif
+          path: rpi.sarif
+
+      - name: Upload SARIF to code scanning
+        # Requires GitHub Advanced Security (Code Scanning) on the repo.
+        # Tolerated when unavailable (e.g. private repo without GHAS) so the
+        # workflow stays green; the SARIF is still kept as an artifact above.
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: rpi.sarif
+          category: rust-project-inspector
