@@ -1,0 +1,5 @@
+# Empty workspace: zero members. Verifies that collect() returns an empty
+# crate list without panicking.
+[workspace]
+resolver = "2"
+members = []
