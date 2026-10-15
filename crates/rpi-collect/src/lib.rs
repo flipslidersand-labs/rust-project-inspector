@@ -268,8 +268,7 @@ fn parse_file(path: &Path) -> Result<Option<SourceFile>> {
         }
     };
     let loc = content.lines().count();
-    let ast = syn::parse_file(&content)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let ast = syn::parse_file(&content).with_context(|| format!("parsing {}", path.display()))?;
     Ok(Some(SourceFile {
         path: path.to_path_buf(),
         loc,
@@ -352,7 +351,10 @@ mod tests {
         match result {
             Err(e) => {
                 let msg = format!("{e:#}");
-                assert!(msg.contains("bad.rs"), "error must mention the file path: {msg}");
+                assert!(
+                    msg.contains("bad.rs"),
+                    "error must mention the file path: {msg}"
+                );
             }
             Ok(_) => panic!("expected Err for file with syntax errors"),
         }
@@ -370,7 +372,10 @@ mod tests {
 
     #[test]
     fn collect_error_mentions_workspace_path() {
-        match collect(std::path::Path::new("/no/such/workspace"), CollectOptions::default()) {
+        match collect(
+            std::path::Path::new("/no/such/workspace"),
+            CollectOptions::default(),
+        ) {
             Err(e) => {
                 let msg = format!("{e:#}");
                 assert!(
