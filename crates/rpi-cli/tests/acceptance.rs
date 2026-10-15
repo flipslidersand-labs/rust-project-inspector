@@ -97,7 +97,11 @@ fn cyclic_context_produces_error_finding() {
         .filter(|f| f.inspection == "workspace-graph" && f.severity == Severity::Error)
         .collect();
 
-    assert_eq!(cycle_errors.len(), 1, "exactly one circular-dep error expected");
+    assert_eq!(
+        cycle_errors.len(),
+        1,
+        "exactly one circular-dep error expected"
+    );
     assert!(
         cycle_errors[0].message.contains("alpha") && cycle_errors[0].message.contains("beta"),
         "error message should name both crates: {:?}",
