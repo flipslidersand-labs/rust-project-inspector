@@ -181,7 +181,9 @@ fn run_cargo_audit(root: &Path) -> Vec<AuditVuln> {
                          hint: install with `cargo install cargo-audit`"
                     );
                 } else {
-                    eprintln!("warn: `cargo audit` produced no output ({msg}); skipping audit-bridge");
+                    eprintln!(
+                        "warn: `cargo audit` produced no output ({msg}); skipping audit-bridge"
+                    );
                 }
             }
             Vec::new()
