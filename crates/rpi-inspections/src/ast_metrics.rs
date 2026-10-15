@@ -374,7 +374,10 @@ mod tests {
         let src = "fn f() {}".to_string();
         let mut file = krate_from_src("k", &[&src]);
         file.files[0].loc = 300;
-        let cfg = Config { module_size_loc: 300, ..Default::default() };
+        let cfg = Config {
+            module_size_loc: 300,
+            ..Default::default()
+        };
         let findings = ModuleSize.run(&ctx_with(cfg, vec![file]));
         assert!(findings.is_empty(), "exactly at threshold must not fire");
     }
@@ -384,7 +387,10 @@ mod tests {
         let src = "fn f() {}".to_string();
         let mut file = krate_from_src("k", &[&src]);
         file.files[0].loc = 301;
-        let cfg = Config { module_size_loc: 300, ..Default::default() };
+        let cfg = Config {
+            module_size_loc: 300,
+            ..Default::default()
+        };
         let findings = ModuleSize.run(&ctx_with(cfg, vec![file]));
         assert_eq!(findings.len(), 1, "one line over threshold must fire");
         assert!(findings[0].message.contains("301"));
@@ -394,7 +400,10 @@ mod tests {
     fn module_size_empty_file_is_not_flagged() {
         let mut file = krate_from_src("k", &[""]);
         file.files[0].loc = 0;
-        let cfg = Config { module_size_loc: 300, ..Default::default() };
+        let cfg = Config {
+            module_size_loc: 300,
+            ..Default::default()
+        };
         let findings = ModuleSize.run(&ctx_with(cfg, vec![file]));
         assert!(findings.is_empty(), "empty file must not fire");
     }
@@ -406,7 +415,11 @@ mod tests {
         let src = "pub unsafe fn danger() {}";
         let c = ctx_with(Config::default(), vec![krate_from_src("k", &[src])]);
         let f = UnsafeSurface.run(&c);
-        assert!(f[0].message.starts_with("1 unsafe item"), "{:?}", f[0].message);
+        assert!(
+            f[0].message.starts_with("1 unsafe item"),
+            "{:?}",
+            f[0].message
+        );
     }
 
     #[test]
@@ -414,7 +427,11 @@ mod tests {
         let src = "struct S; trait T {} unsafe impl T for S {}";
         let c = ctx_with(Config::default(), vec![krate_from_src("k", &[src])]);
         let f = UnsafeSurface.run(&c);
-        assert!(f[0].message.starts_with("1 unsafe item"), "{:?}", f[0].message);
+        assert!(
+            f[0].message.starts_with("1 unsafe item"),
+            "{:?}",
+            f[0].message
+        );
     }
 
     #[test]
@@ -422,7 +439,11 @@ mod tests {
         let src = "fn f() { unsafe { let _ = 1; } }";
         let c = ctx_with(Config::default(), vec![krate_from_src("k", &[src])]);
         let f = UnsafeSurface.run(&c);
-        assert!(f[0].message.starts_with("1 unsafe item"), "{:?}", f[0].message);
+        assert!(
+            f[0].message.starts_with("1 unsafe item"),
+            "{:?}",
+            f[0].message
+        );
     }
 
     // --- pub-surface: restricted visibility not counted ---

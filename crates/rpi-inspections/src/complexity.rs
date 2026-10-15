@@ -195,11 +195,17 @@ mod tests {
         };
         let ctx = Context {
             crates: vec![krate],
-            config: Config { complexity_warn: 3, ..Default::default() },
+            config: Config {
+                complexity_warn: 3,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let f = Complexity.run(&ctx);
-        assert!(f.is_empty(), "at threshold must not fire (strictly greater-than)");
+        assert!(
+            f.is_empty(),
+            "at threshold must not fire (strictly greater-than)"
+        );
     }
 
     #[test]

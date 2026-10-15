@@ -147,19 +147,28 @@ mod tests {
     fn no_external_deps_produces_no_findings() {
         let k = krate("k", &[], "pub fn f() {}");
         let f = DepHygiene.run(&ctx(vec![k], &[]));
-        assert!(f.is_empty(), "crate with no external deps must produce no findings");
+        assert!(
+            f.is_empty(),
+            "crate with no external deps must produce no findings"
+        );
     }
 
     #[test]
     fn used_dep_is_not_flagged() {
         let k = krate("k", &["serde"], "use serde::Serialize; fn f() {}");
         let f = DepHygiene.run(&ctx(vec![k], &[]));
-        assert!(f.is_empty(), "a dep that is actually used must not be flagged");
+        assert!(
+            f.is_empty(),
+            "a dep that is actually used must not be flagged"
+        );
     }
 
     #[test]
     fn solo_version_is_not_flagged() {
         let f = DepHygiene.run(&ctx(vec![], &[("solo", "1.0.0")]));
-        assert!(f.is_empty(), "single version must not trigger duplicate finding");
+        assert!(
+            f.is_empty(),
+            "single version must not trigger duplicate finding"
+        );
     }
 }
