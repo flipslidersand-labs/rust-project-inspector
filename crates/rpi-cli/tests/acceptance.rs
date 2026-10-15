@@ -107,9 +107,8 @@ fn large_module_triggers_module_size_at_default_threshold() {
         .flat_map(|i| i.run(&ctx))
         .collect();
     assert!(
-        findings
-            .iter()
-            .any(|f| f.inspection == "module-size" && f.location.krate.as_deref() == Some("large_module")),
+        findings.iter().any(|f| f.inspection == "module-size"
+            && f.location.krate.as_deref() == Some("large_module")),
         "file exceeding 300 LOC must trigger module-size with default config"
     );
 }
