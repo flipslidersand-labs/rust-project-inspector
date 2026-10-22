@@ -3,7 +3,7 @@
 ## 開発環境セットアップ
 
 ```bash
-git clone https://github.com/flipslidersand/rust-project-inspector.git
+git clone https://github.com/flipslidersand-labs/rust-project-inspector.git
 cd rust-project-inspector
 
 # ビルド確認
@@ -44,8 +44,6 @@ cargo clippy --all-targets --all-features -- -D warnings  # Lint
 |---|---|
 | `multi/` | 2-crate workspace。各 inspection の positive/negative を網羅 |
 | `sample/` | 単一 crate。collect の基本動作テスト用 |
-| `large-module/` | 300 LOC 超ファイルを持つ crate。`module-size` のデフォルト閾値テスト |
-| `empty/` | メンバー 0 の workspace 宣言（`cargo metadata` は空を返さないので Context レベルで検証） |
 
 ## PR プロセス
 
@@ -53,7 +51,7 @@ cargo clippy --all-targets --all-features -- -D warnings  # Lint
 2. ブランチ名: `feat/issue-{N}-{description}` または `fix/issue-{N}-{description}`
 3. 1 PR = 1 Issue を原則とする
 4. `cargo fmt` / `cargo clippy` / `cargo test` をすべて通してから PR を出す
-5. CI（check ジョブ + audit ジョブ）が緑になってからマージ
+5. CI（`.github/workflows/ci.yml` の `check` ジョブ）が緑になってからマージ
 
 ## 新しい inspection を追加する
 
@@ -88,8 +86,9 @@ impl Inspection for MyInspection {
     fn run(&self, ctx: &Context) -> Vec<Finding> {
         let mut findings = Vec::new();
         for krate in &ctx.crates {
-            // ctx.config.* で rpi.toml の閾値を参照できる
-            if /* 条件 */ false {
+            // 例: ソースファイルを持たない crate を警告する。
+            // 閾値が必要なら ctx.config.*（rpi.toml で上書き可能）を参照する
+            if krate.files.is_empty() {
                 findings.push(Finding {
                     inspection: Self::NAME,
                     severity: Severity::Warn,
@@ -97,7 +96,7 @@ impl Inspection for MyInspection {
                         krate: Some(krate.name.clone()),
                         ..Default::default()
                     },
-                    message: format!("{} has ...", krate.name),
+                    message: format!("{} has no source files", krate.name),
                     metric: None,
                 });
             }
@@ -130,8 +129,16 @@ mod tests {
             ..Default::default()
         };
         let findings = MyInspection.run(&ctx);
-        // assert expected findings
-        let _ = findings;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].inspection, MyInspection::NAME);
+        assert_eq!(findings[0].severity, Severity::Warn);
+        assert_eq!(findings[0].location.krate.as_deref(), Some("example"));
+    }
+
+    #[test]
+    fn no_findings_when_no_crates() {
+        let findings = MyInspection.run(&rpi_core::Context::default());
+        assert!(findings.is_empty());
     }
 }
 ```
@@ -142,7 +149,7 @@ mod tests {
 // crates/rpi-inspections/src/lib.rs
 
 mod my_inspection;  // 追加
-use my_inspection::MyInspection;
+pub use my_inspection::MyInspection;  // 追加（他の inspection と同様 `pub use`）
 
 pub fn all() -> Vec<Box<dyn rpi_core::Inspection>> {
     vec![
@@ -192,8 +199,9 @@ inspection 内では `ctx.config.my_inspection_warn` で参照します。
 ```
 rust-project-inspector/
 ├── Cargo.toml                  # workspace 定義
-├── audit.toml                  # cargo audit の ignore リスト
-├── rpi.toml                    # rpi 自身の閾値設定（self-dogfood）
+├── DESIGN.md                   # 設計メモ
+├── README.md
+├── .github/workflows/          # ci.yml（check ジョブ）/ inspect.yml（SARIF 出力）
 ├── crates/
 │   ├── rpi-core/               # Finding / Report / Inspection trait / Config
 │   ├── rpi-collect/            # cargo_metadata + syn パース + git churn
