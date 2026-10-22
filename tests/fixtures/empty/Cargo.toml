@@ -1,5 +1,7 @@
-# Empty workspace: zero members. Verifies that collect() returns an empty
-# crate list without panicking.
+# Empty workspace: zero members. The full `cargo metadata` that collect() runs
+# rejects this ("the manifest is virtual, and the workspace has no members"),
+# so collect() returns Err here; see zero_member_workspace_is_rejected_by_collect.
+# (`cargo metadata --no-deps` accepts it and returns `packages: []`.)
 [workspace]
 resolver = "2"
 members = []
