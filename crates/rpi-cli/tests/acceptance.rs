@@ -75,12 +75,14 @@ fn rpi_toml_thresholds_are_honored() {
 // --baseline trend acceptance tests
 // ---------------------------------------------------------------------------
 
-/// Write `baseline_json` to a temp file named `label`, run the real `rpi`
-/// binary with `--baseline <path>`, and return its stderr.
+/// Write `baseline_json` to a temp file, run the real `rpi` binary with
+/// `--baseline <path>`, and return `(exit success, stderr)`.
 ///
-/// Each test passes a unique `label` so parallel test runs don't collide on
-/// the same temp-file path.
-fn run_with_baseline(label: &str, baseline_json: &serde_json::Value) -> String {
+/// `label` only keeps parallel tests from colliding on the same temp path. It
+/// ends up in the file name, which is echoed to stderr when the baseline cannot
+/// be read, so callers must pass a neutral label and must never assert on a
+/// bare word that could also appear in that path.
+fn run_with_baseline(label: &str, baseline_json: &serde_json::Value) -> (bool, String) {
     use std::io::Write as _;
     let path = std::env::temp_dir().join(format!("rpi_acceptance_baseline_{label}.json"));
     let json = serde_json::to_string(baseline_json).unwrap();
@@ -98,39 +100,46 @@ fn run_with_baseline(label: &str, baseline_json: &serde_json::Value) -> String {
         .expect("rpi binary must be runnable");
 
     let _ = std::fs::remove_file(&path);
-    String::from_utf8_lossy(&out.stderr).into_owned()
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// Run with a baseline of `base` findings and assert that the binary exited 0,
+/// read the baseline, and printed exactly the expected trend line.
+fn assert_trend(label: &str, base: i64, arrow: &str, verdict: &str) {
+    let cur = run().len() as i64;
+    let delta = cur - base;
+    let prior = serde_json::json!({"metrics": {"finding_count": base}});
+    let (ok, stderr) = run_with_baseline(label, &prior);
+    assert!(ok, "rpi must exit 0 without --fail-on: {stderr}");
+    assert!(
+        !stderr.contains("could not read baseline"),
+        "baseline must be readable: {stderr}"
+    );
+    let want = format!("trend: findings {base} → {cur} ({delta:+}) {arrow} {verdict}");
+    assert!(
+        stderr.lines().any(|l| l == want),
+        "expected trend line `{want}` in stderr: {stderr}"
+    );
 }
 
 #[test]
 fn baseline_regression_detected() {
     // Prior report had 0 findings; current fixture has several → regression.
-    let prior = serde_json::json!({"metrics": {"finding_count": 0}});
-    let stderr = run_with_baseline("regression", &prior);
-    assert!(
-        stderr.contains("regression"),
-        "trend must report regression when findings increased: {stderr}"
-    );
+    assert_trend("case1", 0, "▲", "regression");
 }
 
 #[test]
 fn baseline_improvement_detected() {
     // Prior report had 9999 findings; current has fewer → improvement.
-    let prior = serde_json::json!({"metrics": {"finding_count": 9999}});
-    let stderr = run_with_baseline("improvement", &prior);
-    assert!(
-        stderr.contains("improvement"),
-        "trend must report improvement when findings decreased: {stderr}"
-    );
+    assert_trend("case2", 9999, "▼", "improvement");
 }
 
 #[test]
 fn baseline_no_change_when_equal() {
-    // Get the actual finding count from the fixture, then use it as baseline.
-    let count = run().len() as u64;
-    let prior = serde_json::json!({"metrics": {"finding_count": count}});
-    let stderr = run_with_baseline("no_change", &prior);
-    assert!(
-        stderr.contains("no change"),
-        "trend must report no change when finding count is equal: {stderr}"
-    );
+    // Use the fixture's actual finding count as the baseline.
+    let count = run().len() as i64;
+    assert_trend("case3", count, "=", "no change");
 }
