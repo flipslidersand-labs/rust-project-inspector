@@ -116,7 +116,13 @@ pub fn collect(root: &Path, opts: CollectOptions) -> Result<Context> {
 /// absent, or the command exceeds `timeout`. The timeout prevents hangs on
 /// repositories with very long histories.
 fn collect_churn(root: &Path, timeout: Duration) -> HashMap<PathBuf, usize> {
-    let mut child = match Command::new("git")
+    collect_churn_with(Command::new("git"), root, timeout)
+}
+
+/// [`collect_churn`] with the git invocation injected (`git` is the program and
+/// any leading arguments), so tests can substitute a stub.
+fn collect_churn_with(mut git: Command, root: &Path, timeout: Duration) -> HashMap<PathBuf, usize> {
+    let mut child = match git
         .args(["-C"])
         .arg(root)
         .args(["log", "--name-only", "--pretty=format:"])
@@ -131,17 +137,24 @@ fn collect_churn(root: &Path, timeout: Duration) -> HashMap<PathBuf, usize> {
     // Read stdout in a background thread so the main thread can enforce a
     // wall-clock timeout without blocking on the child's pipe.
     let stdout = child.stdout.take().expect("stdout was piped");
-    let (tx, rx) = mpsc::channel::<String>();
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
     thread::spawn(move || {
-        let mut buf = String::new();
-        let _ = std::io::BufReader::new(stdout).read_to_string(&mut buf);
+        // Read raw bytes: git paths need not be UTF-8, and a decode error must
+        // not discard the whole history. Decode lossily afterwards.
+        let mut buf = Vec::new();
+        let _ = std::io::BufReader::new(stdout).read_to_end(&mut buf);
         let _ = tx.send(buf);
     });
 
     let raw = match rx.recv_timeout(timeout) {
-        Ok(s) => {
-            let _ = child.wait(); // reap the process
-            s
+        Ok(bytes) => {
+            // Reap the process and require success: a git that fails midway
+            // (e.g. a corrupt older object) leaves partial output that would
+            // silently undercount churn.
+            match child.wait() {
+                Ok(status) if status.success() => String::from_utf8_lossy(&bytes).into_owned(),
+                _ => return HashMap::new(),
+            }
         }
         Err(_) => {
             // Timeout or thread panic: kill git and report.
@@ -395,6 +408,57 @@ mod tests {
         // Result may or may not be empty depending on system speed; just verify
         // the function terminates and the map is well-formed.
         let _ = churn.len();
+    }
+
+    /// Write an executable-free shell stub (run as `sh <script>`) into a fresh
+    /// temp dir and return `(dir, command)`. Avoids ETXTBSY and PATH games.
+    #[cfg(unix)]
+    fn stub_git(name: &str, body: &str) -> (PathBuf, Command) {
+        let dir =
+            std::env::temp_dir().join(format!("rpi_churn_stub_{name}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("git-stub.sh");
+        std::fs::write(&script, body).unwrap();
+        let mut cmd = Command::new("sh");
+        cmd.arg(script);
+        (dir, cmd)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_churn_rejects_partial_output_from_failed_git() {
+        // Emits a commit's paths, then fails (e.g. corrupt older object).
+        let (dir, cmd) = stub_git("fail", "printf 'src/a.rs\nsrc/b.rs\n'\nexit 128\n");
+        let churn = collect_churn_with(cmd, &dir, Duration::from_secs(10));
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            churn.is_empty(),
+            "failed git must not yield partial churn: {churn:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_churn_accepts_successful_git_output() {
+        let (dir, cmd) = stub_git("ok", "printf 'src/a.rs\n\nsrc/a.rs\nREADME.md\n'\n");
+        let churn = collect_churn_with(cmd, &dir, Duration::from_secs(10));
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(churn.len(), 1);
+        assert_eq!(churn.values().copied().next(), Some(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_churn_survives_non_utf8_paths() {
+        // 0xFF is never valid UTF-8; ordinary paths must still be counted.
+        let (dir, cmd) = stub_git(
+            "nonutf8",
+            "printf 'src/ok.rs\nsrc/bad\\377.rs\nsrc/ok.rs\n'\n",
+        );
+        let churn = collect_churn_with(cmd, &dir, Duration::from_secs(10));
+        std::fs::remove_dir_all(&dir).ok();
+        let ok = churn.iter().find(|(p, _)| p.ends_with("src/ok.rs"));
+        assert_eq!(ok.map(|(_, n)| *n), Some(2), "UTF-8 paths lost: {churn:?}");
     }
 
     #[test]
