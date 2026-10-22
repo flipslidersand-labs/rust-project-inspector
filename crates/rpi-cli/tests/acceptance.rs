@@ -75,18 +75,34 @@ fn rpi_toml_thresholds_are_honored() {
 // --baseline trend acceptance tests
 // ---------------------------------------------------------------------------
 
+/// Temp baseline file that is removed on drop, so it is cleaned up even when an
+/// assertion (or the spawn) panics.
+struct TempBaseline(PathBuf);
+
+impl Drop for TempBaseline {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// Write `baseline_json` to a temp file, run the real `rpi` binary with
 /// `--baseline <path>`, and return `(exit success, stderr)`.
 ///
-/// `label` only keeps parallel tests from colliding on the same temp path. It
-/// ends up in the file name, which is echoed to stderr when the baseline cannot
-/// be read, so callers must pass a neutral label and must never assert on a
-/// bare word that could also appear in that path.
+/// The path is `<tmp>/rpi_acceptance_baseline_<pid>_<label>.json`: the process
+/// id keeps concurrent `cargo test` processes (or CI jobs sharing `TMPDIR`)
+/// apart, and `label` keeps the tests within one process apart. The path is
+/// echoed to stderr when the baseline cannot be read, so callers must pass a
+/// neutral label and must never assert on a bare word (or number) that could
+/// also appear in that path.
 fn run_with_baseline(label: &str, baseline_json: &serde_json::Value) -> (bool, String) {
     use std::io::Write as _;
-    let path = std::env::temp_dir().join(format!("rpi_acceptance_baseline_{label}.json"));
+    let tmp = TempBaseline(std::env::temp_dir().join(format!(
+        "rpi_acceptance_baseline_{}_{label}.json",
+        std::process::id()
+    )));
+    // Guard first: it removes the file even if writing it fails part-way.
     let json = serde_json::to_string(baseline_json).unwrap();
-    std::fs::File::create(&path)
+    std::fs::File::create(&tmp.0)
         .unwrap()
         .write_all(json.as_bytes())
         .unwrap();
@@ -95,11 +111,10 @@ fn run_with_baseline(label: &str, baseline_json: &serde_json::Value) -> (bool, S
         .args(["inspect"])
         .arg(fixture())
         .arg("--baseline")
-        .arg(&path)
+        .arg(&tmp.0)
         .output()
         .expect("rpi binary must be runnable");
 
-    let _ = std::fs::remove_file(&path);
     (
         out.status.success(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
