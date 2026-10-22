@@ -90,7 +90,10 @@ pub fn collect(root: &Path, opts: CollectOptions) -> Result<Context> {
     } else {
         Vec::new()
     };
-    let churn = collect_churn(&root_dir, Duration::from_secs(config.churn_git_timeout_secs));
+    let churn = collect_churn(
+        &root_dir,
+        Duration::from_secs(config.churn_git_timeout_secs),
+    );
 
     let workspace = WorkspaceInfo {
         root: root_dir,
