@@ -66,14 +66,7 @@ enum FailLevel {
     Error,
 }
 
-fn main() {
-    if let Err(e) = run() {
-        eprintln!("Error: {e:#}");
-        std::process::exit(1);
-    }
-}
-
-fn run() -> Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Inspect {
