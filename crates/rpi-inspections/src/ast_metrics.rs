@@ -452,14 +452,19 @@ mod tests {
     fn pub_crate_and_pub_super_not_counted_as_pub() {
         // pub(crate) and pub(super) are Visibility::Restricted, not Public.
         let src = "pub(crate) fn a() {} pub(super) struct B; pub fn c() {}";
-        let c = ctx_with(Config::default(), vec![krate_from_src("k", &[src])]);
+        // Threshold 0 forces a Warn finding so the count itself is asserted.
+        let cfg = Config {
+            pub_surface_warn: 0,
+            ..Default::default()
+        };
+        let c = ctx_with(cfg, vec![krate_from_src("k", &[src])]);
         let f = PubSurface.run(&c);
-        // Only `pub fn c()` should be counted → 1 public item (below default threshold of 50).
-        // The inspection does not fire below threshold, so findings should be empty.
+        // Only `pub fn c()` is counted.
+        assert_eq!(f.len(), 1, "{:?}", f);
         assert!(
-            f.is_empty() || !f[0].message.contains("3 public"),
+            f[0].message.starts_with("1 public items"),
             "pub(crate) and pub(super) must not be counted as pub: {:?}",
-            f
+            f[0].message
         );
     }
 
