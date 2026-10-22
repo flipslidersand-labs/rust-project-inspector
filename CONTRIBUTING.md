@@ -166,11 +166,13 @@ pub fn all() -> Vec<Box<dyn rpi_core::Inspection>> {
 
 ### Step 4 — README の inspection 一覧を更新
 
-`README.md` の inspection テーブルに1行追加します:
+`README.md` の inspection テーブル(`Inspection` / `Detects / 検出` の2列)に1行追加します:
 
 ```markdown
-| `my-inspection` | 検出する内容 | Warn |
+| `my-inspection` | Detects X / 検出する内容 |
 ```
+
+> 注: これは main の現在の README の列構成に合わせた例です。README 側の列が変わった場合(例: severity 列の追加)は、この例も更新してください。
 
 ### Step 5 — 閾値が必要な場合は `Config` に追加
 
