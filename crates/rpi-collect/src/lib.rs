@@ -5,6 +5,7 @@
 //! `syn`. Inspections then read the shared [`Context`] without re-parsing.
 
 use std::collections::{BTreeSet, HashMap};
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -104,25 +105,25 @@ pub fn collect(root: &Path, opts: CollectOptions) -> Result<Context> {
 }
 
 /// Count how many commits touched each `.rs` file, via `git log --name-only`.
-/// Best-effort: returns empty when the root is not a git repo or git is absent.
+/// Best-effort: returns empty (after a `[skip]` notice) when `git` is not on
+/// PATH, and silently when the root is not a git repo (git exits non-zero).
 fn collect_churn(root: &Path) -> HashMap<PathBuf, usize> {
+    if let Some(notice) = skip_notice(
+        "churn-hotspot",
+        "git",
+        "install git and ensure it is on PATH",
+        search_path().as_deref(),
+    ) {
+        eprintln!("{notice}");
+        return HashMap::new();
+    }
     let output = Command::new("git")
         .args(["-C"])
         .arg(root)
         .args(["log", "--name-only", "--pretty=format:"])
         .output();
-    let out = match output {
-        Ok(o) => o,
-        Err(e) => {
-            // Distinguish "git not installed" so the user knows what to fix.
-            if e.kind() == std::io::ErrorKind::NotFound {
-                eprintln!(
-                    "warn: `git` not found; churn-hotspot will be skipped\n\
-                     hint: install git and ensure it is on PATH"
-                );
-            }
-            return HashMap::new();
-        }
+    let Ok(out) = output else {
+        return HashMap::new();
     };
     if !out.status.success() {
         return HashMap::new();
@@ -158,10 +159,20 @@ fn git_toplevel(dir: &Path) -> Option<PathBuf> {
     (!top.is_empty()).then(|| PathBuf::from(top))
 }
 
-/// Run `cargo audit --json` at `root` and parse advisories. Best-effort: if the
-/// binary is missing or the command fails, warn once and return no vulns rather
-/// than aborting the inspection.
+/// Run `cargo audit --json` at `root` and parse advisories. Best-effort:
+/// `cargo-audit` is looked up on PATH first and, when absent, a `[skip]` notice
+/// is printed and the command is not run. Other failures warn once and return
+/// no vulns rather than aborting the inspection.
 fn run_cargo_audit(root: &Path) -> Vec<AuditVuln> {
+    if let Some(notice) = skip_notice(
+        "audit-bridge",
+        "cargo-audit",
+        "install with `cargo install cargo-audit`",
+        search_path().as_deref(),
+    ) {
+        eprintln!("{notice}");
+        return Vec::new();
+    }
     let output = Command::new("cargo")
         .args(["audit", "--json"])
         .current_dir(root)
@@ -171,29 +182,10 @@ fn run_cargo_audit(root: &Path) -> Vec<AuditVuln> {
             parse_audit_json(&String::from_utf8_lossy(&out.stdout))
         }
         Ok(out) => {
-            // cargo audit ran but wrote nothing to stdout (e.g. subcommand not
-            // found, permission error, or an unexpected output format).
             if !out.stderr.is_empty() {
                 let msg = String::from_utf8_lossy(&out.stderr);
-                if msg.contains("no such subcommand") || msg.contains("is not installed") {
-                    eprintln!(
-                        "warn: `cargo-audit` is not installed; skipping audit-bridge\n\
-                         hint: install with `cargo install cargo-audit`"
-                    );
-                } else {
-                    eprintln!(
-                        "warn: `cargo audit` produced no output ({msg}); skipping audit-bridge"
-                    );
-                }
+                eprintln!("warn: `cargo audit` produced no output ({msg}); skipping audit-bridge");
             }
-            Vec::new()
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // cargo itself was not found — extremely rare but handle gracefully.
-            eprintln!(
-                "warn: `cargo` not found; skipping audit-bridge\n\
-                 hint: install Rust via https://rustup.rs"
-            );
             Vec::new()
         }
         Err(e) => {
@@ -201,6 +193,34 @@ fn run_cargo_audit(root: &Path) -> Vec<AuditVuln> {
             Vec::new()
         }
     }
+}
+
+/// Directories searched for external tools: `PATH` plus `$CARGO_HOME/bin`
+/// (default `~/.cargo/bin`), which is where `cargo` itself also looks for
+/// `cargo-*` subcommands. `None` when neither is known.
+fn search_path() -> Option<OsString> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    let cargo_home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")));
+    dirs.extend(cargo_home.map(|h| h.join("bin")));
+    std::env::join_paths(dirs).ok()
+}
+
+/// Whether executable `tool` exists in `search` (a PATH-style list). `None` or
+/// an empty list never matches.
+fn tool_available(tool: &str, search: Option<&OsStr>) -> bool {
+    search.is_some_and(|dirs| which::which_in(tool, Some(dirs), ".").is_ok())
+}
+
+/// Pre-flight check for an external tool. `Some(message)` (with a `[skip]`
+/// line and an install hint) when `tool` is missing and the inspection must be
+/// skipped; `None` when it is available and the command may run.
+fn skip_notice(inspection: &str, tool: &str, hint: &str, search: Option<&OsStr>) -> Option<String> {
+    (!tool_available(tool, search))
+        .then(|| format!("[skip] {inspection}: {tool} not found\nhint: {hint}"))
 }
 
 /// Parse the `cargo audit --json` document into [`AuditVuln`]s. Tolerant of
@@ -366,27 +386,59 @@ mod tests {
     }
 
     #[test]
-    fn collect_churn_returns_empty_for_nonexistent_git_root() {
-        // A path with no .git returns empty without panicking.
-        // This also exercises the NotFound branch when git itself is present
-        // but the directory is not a repo (git exits non-zero).
-        let tmp = std::env::temp_dir().join("rpi_issue21_no_git");
-        std::fs::create_dir_all(&tmp).ok();
+    fn collect_churn_returns_empty_outside_a_git_repo() {
+        // A directory with no .git yields no churn: either git exits non-zero
+        // (not a repo) or git is absent and the pre-flight check skips it.
+        let tmp = std::env::temp_dir().join(format!("rpi_issue21_no_git_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
         let churn = collect_churn(&tmp);
         std::fs::remove_dir_all(&tmp).ok();
         assert!(churn.is_empty());
     }
 
     #[test]
-    fn run_cargo_audit_with_missing_subcommand_returns_empty() {
-        // Run `cargo audit-nonexistent` to simulate "subcommand not installed".
-        // We can't fully mock the binary path, but we can verify the function
-        // signature accepts a Path and returns Vec without panicking.
-        let tmp = std::env::temp_dir();
-        // Direct test: pass a path that exists; cargo is available in CI.
-        // The result may be empty (audit not installed) or contain vulns —
-        // either way it must not panic.
-        let vulns = run_cargo_audit(&tmp);
-        let _ = vulns.len(); // just verify no panic
+    fn missing_tool_is_reported_with_skip_and_hint() {
+        // No search path at all, and an empty one: nothing can be found.
+        for search in [None, Some(OsStr::new(""))] {
+            let notice = skip_notice(
+                "audit-bridge",
+                "cargo-audit",
+                "install with `cargo install cargo-audit`",
+                search,
+            )
+            .expect("tool must be reported missing");
+            assert_eq!(
+                notice,
+                "[skip] audit-bridge: cargo-audit not found\n\
+                 hint: install with `cargo install cargo-audit`"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_tool_in_nonexistent_dir_is_reported() {
+        let dir = std::env::temp_dir().join("rpi_issue21_definitely_absent_dir");
+        let notice = skip_notice("churn-hotspot", "git", "install git", Some(dir.as_os_str()));
+        assert!(notice.is_some_and(|n| n.starts_with("[skip] churn-hotspot: git not found")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn present_tool_proceeds_without_notice() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("rpi_issue21_fake_bin_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("cargo-audit");
+        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let found = skip_notice("audit-bridge", "cargo-audit", "hint", Some(dir.as_os_str()));
+        // A non-executable file of the same name must not count as available.
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let not_exec = skip_notice("audit-bridge", "cargo-audit", "hint", Some(dir.as_os_str()));
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(found, None);
+        assert!(not_exec.is_some());
     }
 }
