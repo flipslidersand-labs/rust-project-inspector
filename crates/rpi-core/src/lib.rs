@@ -140,6 +140,9 @@ pub struct Config {
     /// A file changed at least this many times (git history) *and* over
     /// `complexity_warn` total complexity is flagged by `churn-hotspot`.
     pub churn_warn: usize,
+    /// Maximum seconds to wait for `git log` before giving up and returning an
+    /// empty churn map. Prevents hangs on repositories with very long histories.
+    pub churn_git_timeout_secs: u64,
 }
 
 impl Default for Config {
@@ -151,6 +154,7 @@ impl Default for Config {
             coupling_warn: 20,
             complexity_warn: 10,
             churn_warn: 5,
+            churn_git_timeout_secs: 30,
         }
     }
 }
