@@ -1,0 +1,9 @@
+# Standalone single-crate workspace. The [workspace] table prevents cargo from
+# merging this fixture into the outer rpi workspace during metadata queries.
+[workspace]
+resolver = "2"
+
+[package]
+name = "large_module"
+version = "0.1.0"
+edition = "2021"
