@@ -90,4 +90,20 @@ mod tests {
         let f = Coupling.run(&ctx_one_file(src, 5));
         assert!(f.is_empty());
     }
+
+    #[test]
+    fn same_crate_multiple_uses_count_once() {
+        // Two `use` items from the same root crate count as 1 distinct root.
+        let src = "use a::X; use a::Y;";
+        let f = Coupling.run(&ctx_one_file(src, 0));
+        assert_eq!(f.len(), 1);
+        assert!(f[0].message.contains("1 distinct"));
+    }
+
+    #[test]
+    fn zero_uses_is_silent() {
+        let src = "pub fn f() {}";
+        let f = Coupling.run(&ctx_one_file(src, 0));
+        assert!(f.is_empty(), "file with no use statements must not fire");
+    }
 }
