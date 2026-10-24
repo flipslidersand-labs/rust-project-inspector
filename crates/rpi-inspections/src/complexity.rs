@@ -162,6 +162,53 @@ mod tests {
     }
 
     #[test]
+    fn nested_if_accumulates_complexity() {
+        // Outer if + inner if = 2 decision points → complexity 3.
+        let src = "fn f(a: bool, b: bool) { if a { if b {} } }";
+        let c = function_complexities(&file(src));
+        assert_eq!(c[0].1, 3, "nested ifs should each add a decision point");
+    }
+
+    #[test]
+    fn match_arms_each_add_one() {
+        // 3-arm match: base(1) + 3 arms = 4.
+        let src = "fn f(x: u8) { match x { 1 => {} 2 => {} _ => {} } }";
+        let c = function_complexities(&file(src));
+        assert_eq!(c[0].1, 4, "each match arm should add 1 to complexity");
+    }
+
+    #[test]
+    fn at_threshold_is_not_flagged() {
+        // 1 base + 2 ifs = 3; threshold=3 → no finding (strictly greater-than).
+        let complex = "fn f(a: bool, b: bool){ if a {} if b {} }"; // 1+2=3
+        let krate = CrateData {
+            name: "k".into(),
+            manifest_path: PathBuf::from("/w/k/Cargo.toml"),
+            root_dir: PathBuf::from("/w/k"),
+            workspace_deps: Vec::new(),
+            external_deps: Vec::new(),
+            files: vec![SourceFile {
+                path: PathBuf::from("/w/k/src/lib.rs"),
+                loc: 1,
+                ast: file(complex),
+            }],
+        };
+        let ctx = Context {
+            crates: vec![krate],
+            config: Config {
+                complexity_warn: 3,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let f = Complexity.run(&ctx);
+        assert!(
+            f.is_empty(),
+            "at threshold must not fire (strictly greater-than)"
+        );
+    }
+
+    #[test]
     fn flags_over_threshold_only() {
         let complex = "fn big(a:bool){ if a {} if a {} if a {} }"; // 1+3=4
         let krate = CrateData {
