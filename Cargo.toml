@@ -26,3 +26,4 @@ syn = { version = "3", features = ["full", "visit"] }
 cargo_metadata = "0.18"
 petgraph = "0.6"
 toml = "0.8"
+which = "8"
