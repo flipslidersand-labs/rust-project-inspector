@@ -55,6 +55,7 @@ workspace ルートに置くと閾値を上書きできる（未指定キーは�
 module_size_loc = 300       # LOC warning threshold / ファイル LOC 警告閾値
 pub_surface_warn = 50       # public items warning threshold / pub item 警告閾値
 unsafe_density_warn = 5.0   # unsafe/kLOC warning threshold / 警告閾値
+churn_git_timeout_secs = 30 # max seconds for git log; churn-hotspot skipped on timeout / git log の最大実行秒数（超過時は churn-hotspot をスキップ）
 ```
 
 ## CI Integration / CI 連携
