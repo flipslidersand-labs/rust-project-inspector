@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use rpi_core::{Finding, Severity};
+use rpi_core::{CrateData, Finding, Report, Severity, WorkspaceInfo};
 
 fn fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -58,6 +58,77 @@ fn no_circular_dependency() {
         .filter(|x| x.inspection == "workspace-graph" && x.severity == Severity::Error)
         .count();
     assert_eq!(cycles, 0);
+}
+
+// --- cyclic dependency tests (Context-level, cargo rejects manifest-level cycles) ---
+
+/// Build a Context with two crates that mutually depend on each other.
+fn cyclic_context() -> rpi_core::Context {
+    let make = |name: &str, deps: &[&str]| CrateData {
+        name: name.to_string(),
+        manifest_path: PathBuf::from(format!("/w/{name}/Cargo.toml")),
+        root_dir: PathBuf::from(format!("/w/{name}")),
+        workspace_deps: deps.iter().map(|s| s.to_string()).collect(),
+        external_deps: Vec::new(),
+        files: Vec::new(),
+    };
+    rpi_core::Context {
+        workspace: WorkspaceInfo {
+            root: PathBuf::from("/w"),
+            crates: vec!["alpha".to_string(), "beta".to_string()],
+        },
+        crates: vec![make("alpha", &["beta"]), make("beta", &["alpha"])],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn cyclic_context_produces_error_finding() {
+    // cargo rejects circular deps at the manifest level, so we build the Context
+    // synthetically to exercise the full inspect pipeline without a real workspace.
+    let ctx = cyclic_context();
+    let findings: Vec<Finding> = rpi_inspections::all()
+        .iter()
+        .flat_map(|i| i.run(&ctx))
+        .collect();
+
+    let cycle_errors: Vec<_> = findings
+        .iter()
+        .filter(|f| f.inspection == "workspace-graph" && f.severity == Severity::Error)
+        .collect();
+
+    assert_eq!(
+        cycle_errors.len(),
+        1,
+        "exactly one circular-dep error expected"
+    );
+    assert!(
+        cycle_errors[0].message.contains("alpha") && cycle_errors[0].message.contains("beta"),
+        "error message should name both crates: {:?}",
+        cycle_errors[0].message
+    );
+}
+
+#[test]
+fn cyclic_finding_is_present_in_json_report() {
+    // Verify the full pipeline: cyclic context → inspect → Report → JSON
+    // serialises without panicking and the finding survives the round-trip.
+    let ctx = cyclic_context();
+    let findings: Vec<Finding> = rpi_inspections::all()
+        .iter()
+        .flat_map(|i| i.run(&ctx))
+        .collect();
+    let report = Report::new(ctx.workspace, findings, "t".to_string());
+    let json = serde_json::to_string_pretty(&report).expect("JSON serialisation must not fail");
+
+    assert!(
+        json.contains("workspace-graph"),
+        "JSON must contain the workspace-graph finding"
+    );
+    assert!(
+        json.contains("\"error\""),
+        "JSON must contain severity=error for the cyclic finding"
+    );
 }
 
 #[test]
