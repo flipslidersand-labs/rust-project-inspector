@@ -27,9 +27,15 @@ pub struct CollectOptions {
 
 /// Build a [`Context`] for the workspace rooted at `root`.
 ///
-/// Files that fail to parse are skipped with a warning on stderr so a single
-/// bad file never aborts the whole run.
+/// `.rs` files that cannot be read or parsed are skipped with a warning on
+/// stderr (path, and line for syntax errors) so a single bad file never aborts
+/// the whole run.
 pub fn collect(root: &Path, opts: CollectOptions) -> Result<Context> {
+    collect_inner(root, opts)
+        .with_context(|| format!("failed to inspect workspace at {}", root.display()))
+}
+
+fn collect_inner(root: &Path, opts: CollectOptions) -> Result<Context> {
     // Full metadata (deps resolved) so `dep-hygiene` can inspect the whole
     // graph for duplicate versions.
     let metadata = MetadataCommand::new()
@@ -301,28 +307,44 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Read and parse a single file. Returns `None` (with a stderr warning) on I/O
-/// or syntax errors so collection is best-effort.
+/// Read and parse a single `.rs` file, best-effort.
+///
+/// Returns `None` after printing a warning to stderr when the file cannot be
+/// read or does not parse (syntax error, or syntax `syn` does not support yet),
+/// so one bad file — e.g. a trybuild compile-fail fixture under `tests/ui` —
+/// never aborts the whole run.
 fn parse_file(path: &Path) -> Option<SourceFile> {
-    let content = match fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("warn: skipping {} (read error: {e})", path.display());
-            return None;
-        }
-    };
-    let loc = content.lines().count();
-    match syn::parse_file(&content) {
-        Ok(ast) => Some(SourceFile {
-            path: path.to_path_buf(),
-            loc,
-            ast,
-        }),
-        Err(e) => {
-            eprintln!("warn: skipping {} (parse error: {e})", path.display());
+    match try_parse_file(path) {
+        Ok(f) => Some(f),
+        Err(msg) => {
+            eprintln!("{msg}");
             None
         }
     }
+}
+
+/// Like [`parse_file`] but returns the warning text instead of printing it.
+///
+/// The message always carries the file path; for syntax errors it also carries
+/// the `line:column` of the error (requires `proc-macro2`'s `span-locations`).
+fn try_parse_file(path: &Path) -> Result<SourceFile, String> {
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("warn: skipping {} (read error: {e})", path.display()))?;
+    let loc = content.lines().count();
+    let ast = syn::parse_file(&content).map_err(|e| {
+        let start = e.span().start();
+        format!(
+            "warn: skipping {}:{}:{} (parse error: {e})",
+            path.display(),
+            start.line,
+            start.column + 1
+        )
+    })?;
+    Ok(SourceFile {
+        path: path.to_path_buf(),
+        loc,
+        ast,
+    })
 }
 
 #[cfg(test)]
@@ -383,6 +405,96 @@ mod tests {
     fn audit_json_tolerates_empty_and_garbage() {
         assert!(parse_audit_json("not json").is_empty());
         assert!(parse_audit_json("{}").is_empty());
+    }
+
+    /// Fresh scratch dir under the system temp dir (removed by the caller).
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rpi_test_{name}_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn syntax_error_is_skipped_with_path_and_line() {
+        let dir = scratch("syntax_error");
+        let path = dir.join("bad.rs");
+        // The error is on line 3.
+        std::fs::write(&path, "fn ok() {}\n\nfn f() { let = ; }\n").unwrap();
+        let result = try_parse_file(&path);
+        std::fs::remove_dir_all(&dir).ok();
+        let msg = result
+            .err()
+            .expect("syntax error must not yield a SourceFile");
+        assert!(
+            msg.contains("bad.rs"),
+            "warning must mention the path: {msg}"
+        );
+        assert!(
+            msg.contains("bad.rs:3:"),
+            "warning must mention the line: {msg}"
+        );
+        assert!(parse_file(&path).is_none());
+    }
+
+    #[test]
+    fn unreadable_file_is_skipped_with_path() {
+        let path = Path::new("/nonexistent/totally/fake.rs");
+        let msg = try_parse_file(path)
+            .err()
+            .expect("unreadable file must not yield a SourceFile");
+        assert!(
+            msg.contains("fake.rs"),
+            "warning must mention the path: {msg}"
+        );
+        assert!(parse_file(path).is_none());
+    }
+
+    #[test]
+    fn bad_file_does_not_stop_collection_of_other_files() {
+        let dir = scratch("bad_among_good");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"scratch_ws\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("tests/ui")).unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "pub fn a() {}\n").unwrap();
+        std::fs::write(dir.join("src/other.rs"), "pub fn b() {}\n").unwrap();
+        std::fs::write(dir.join("tests/ui/bad.rs"), "fn f() { let = ; }\n").unwrap();
+
+        let ctx = collect(&dir, CollectOptions::default());
+        std::fs::remove_dir_all(&dir).ok();
+        let ctx = ctx.expect("a syntax-error file must not abort collection");
+
+        let names: Vec<String> = ctx.crates[0]
+            .files
+            .iter()
+            .map(|f| f.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["lib.rs", "other.rs"],
+            "good files must all be collected"
+        );
+    }
+
+    #[test]
+    fn collect_error_mentions_workspace_path() {
+        match collect(
+            std::path::Path::new("/no/such/workspace"),
+            CollectOptions::default(),
+        ) {
+            Err(e) => {
+                let msg = format!("{e:#}");
+                assert!(
+                    msg.contains("/no/such/workspace"),
+                    "error must mention workspace path: {msg}"
+                );
+            }
+            Ok(_) => panic!("expected Err for non-existent workspace"),
+        }
     }
 
     #[test]
