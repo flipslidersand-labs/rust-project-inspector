@@ -78,6 +78,7 @@ workspace ルートに置くと閾値を上書きできる（未指定キーは�
 | `coupling_warn` | `20` | `coupling` | Distinct crate roots imported by one file above this is flagged / 1ファイルが import する crate 数がこれを超えると警告 |
 | `complexity_warn` | `10` | `complexity`, `churn-hotspot` | Function cyclomatic complexity above this is flagged; `churn-hotspot` also requires file total complexity above this / 関数の循環的複雑度がこれを超えると警告。`churn-hotspot` ではファイル合計複雑度にも適用 |
 | `churn_warn` | `5` | `churn-hotspot` | Git change count at or above this (and complexity above `complexity_warn`) is flagged / git 変更回数がこれ以上（かつ複雑度が `complexity_warn` 超）で警告 |
+| `churn_git_timeout_secs` | `30` | `churn-hotspot` | Max seconds for `git log`; `churn-hotspot` is skipped on timeout / `git log` の最大実行秒数（超過時は `churn-hotspot` をスキップ） |
 
 ```toml
 module_size_loc = 300       # LOC warning threshold / ファイル LOC 警告閾値
@@ -86,6 +87,7 @@ unsafe_density_warn = 5.0   # unsafe/kLOC warning threshold / 警告閾値
 coupling_warn = 20          # imported crate roots per file / ファイルあたり import crate 数
 complexity_warn = 10        # cyclomatic complexity per function / 関数の循環的複雑度
 churn_warn = 5              # git changes per file / ファイルの git 変更回数
+churn_git_timeout_secs = 30 # max seconds for git log; churn-hotspot skipped on timeout / git log の最大実行秒数（超過時は churn-hotspot をスキップ）
 ```
 
 ## CI Integration / CI 連携
