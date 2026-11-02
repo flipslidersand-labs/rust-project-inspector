@@ -240,6 +240,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "cargo_metadata",
+ "proc-macro2",
  "rpi-core",
  "serde_json",
  "syn 3.0.3",
