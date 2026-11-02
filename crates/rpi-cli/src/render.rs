@@ -22,7 +22,8 @@ pub fn json(report: &Report) -> Result<String> {
 ///
 /// File paths are emitted relative to the workspace root so GitHub can anchor
 /// results to the repository tree; crate-scoped findings without a file are
-/// reported without a physical location (GitHub shows them at the repo root).
+/// anchored to the workspace `Cargo.toml` (GitHub Code Scanning rejects results
+/// that have no location).
 pub fn sarif(report: &Report) -> Result<String> {
     use serde_json::json;
 
@@ -45,20 +46,23 @@ pub fn sarif(report: &Report) -> Result<String> {
                 "level": sarif_level(f.severity),
                 "message": { "text": f.message },
             });
-            if let Some(file) = &f.location.file {
-                let uri = file
+            // Code Scanning requires at least one location; fall back to the
+            // workspace manifest for findings without a file.
+            let uri = match &f.location.file {
+                Some(file) => file
                     .strip_prefix(root)
                     .unwrap_or(file)
                     .display()
-                    .to_string();
-                let line = f.location.span.map(|(s, _)| s).unwrap_or(1).max(1);
-                result["locations"] = json!([{
-                    "physicalLocation": {
-                        "artifactLocation": { "uri": uri },
-                        "region": { "startLine": line }
-                    }
-                }]);
-            }
+                    .to_string(),
+                None => "Cargo.toml".to_string(),
+            };
+            let line = f.location.span.map(|(s, _)| s).unwrap_or(1).max(1);
+            result["locations"] = json!([{
+                "physicalLocation": {
+                    "artifactLocation": { "uri": uri },
+                    "region": { "startLine": line }
+                }
+            }]);
             result
         })
         .collect();
@@ -338,5 +342,14 @@ mod tests {
         let uri = &v["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
             ["artifactLocation"]["uri"];
         assert_eq!(uri, "crates/k/src/big.rs");
+    }
+
+    #[test]
+    fn sarif_fileless_finding_falls_back_to_cargo_toml() {
+        let r = report(vec![finding("pub-surface", Severity::Info, "k")]);
+        let v: serde_json::Value = serde_json::from_str(&sarif(&r).unwrap()).unwrap();
+        let loc = &v["runs"][0]["results"][0]["locations"][0]["physicalLocation"];
+        assert_eq!(loc["artifactLocation"]["uri"], "Cargo.toml");
+        assert_eq!(loc["region"]["startLine"], 1);
     }
 }
