@@ -589,6 +589,7 @@ mod tests {
         assert!(notice.is_some_and(|n| n.starts_with("[skip] churn-hotspot: git not found")));
     }
 
+    #[test]
     fn collect_churn_returns_empty_outside_git() {
         // A directory with no .git returns an empty churn map without panicking.
         let tmp = std::env::temp_dir().join("rpi_churn_no_git_29");
