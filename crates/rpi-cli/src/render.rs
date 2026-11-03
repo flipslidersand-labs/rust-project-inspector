@@ -83,22 +83,25 @@ pub fn sarif(report: &Report) -> Result<String> {
 }
 
 /// Compare the current report against a previously-saved JSON report and
-/// describe the trend. `baseline` is the parsed prior report (any shape tolerated
-/// via `serde_json::Value`).
-pub fn trend(current: &Report, baseline: &serde_json::Value) -> String {
+/// describe the trend. `baseline` is the parsed prior report. Returns `Err` when
+/// it lacks an integer `metrics.finding_count`: such a baseline must not be
+/// read as "0 findings", which would report a bogus regression (#56).
+pub fn trend(current: &Report, baseline: &serde_json::Value) -> Result<String, String> {
     let cur = current.metrics.finding_count as i64;
     let base = baseline
         .get("metrics")
         .and_then(|m| m.get("finding_count"))
         .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+        .ok_or("baseline has no integer metrics.finding_count (not a rpi JSON report?)")?;
     let delta = cur - base;
     let (arrow, verdict) = match delta.cmp(&0) {
         std::cmp::Ordering::Greater => ("▲", "regression"),
         std::cmp::Ordering::Less => ("▼", "improvement"),
         std::cmp::Ordering::Equal => ("=", "no change"),
     };
-    format!("trend: findings {base} → {cur} ({delta:+}) {arrow} {verdict}")
+    Ok(format!(
+        "trend: findings {base} → {cur} ({delta:+}) {arrow} {verdict}"
+    ))
 }
 
 fn sarif_level(sev: Severity) -> &'static str {
@@ -280,9 +283,9 @@ mod tests {
         ]);
         let base_more: serde_json::Value = serde_json::json!({"metrics":{"finding_count":5}});
         let base_less: serde_json::Value = serde_json::json!({"metrics":{"finding_count":0}});
-        assert!(trend(&cur, &base_more).contains("improvement"));
-        assert!(trend(&cur, &base_less).contains("regression"));
-        assert!(trend(&cur, &base_less).contains("(+2)"));
+        assert!(trend(&cur, &base_more).unwrap().contains("improvement"));
+        assert!(trend(&cur, &base_less).unwrap().contains("regression"));
+        assert!(trend(&cur, &base_less).unwrap().contains("(+2)"));
     }
 
     #[test]
