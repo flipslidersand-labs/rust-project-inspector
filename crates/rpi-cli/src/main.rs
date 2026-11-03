@@ -105,7 +105,10 @@ fn inspect(
     // Trend goes to stderr so it never pollutes machine-readable stdout.
     if let Some(path) = baseline {
         match load_json(&path) {
-            Ok(prior) => eprintln!("{}", render::trend(&report, &prior)),
+            Ok(prior) => match render::trend(&report, &prior) {
+                Ok(line) => eprintln!("{line}"),
+                Err(e) => eprintln!("warn: baseline {}: {e}", path.display()),
+            },
             Err(e) => eprintln!("warn: could not read baseline {}: {e}", path.display()),
         }
     }

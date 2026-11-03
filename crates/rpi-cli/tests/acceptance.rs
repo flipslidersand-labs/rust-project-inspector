@@ -230,6 +230,40 @@ fn baseline_no_change_when_equal() {
     assert_trend("case3", count, "=", "no change");
 }
 
+/// #56: a baseline that parses but lacks `metrics.finding_count` must not be
+/// treated as "0 findings" (which would report a bogus regression). It warns
+/// instead, and still exits 0 without `--fail-on`.
+fn assert_unusable_baseline(label: &str, prior: serde_json::Value) {
+    let (ok, stderr) = run_with_baseline(label, &prior);
+    assert!(ok, "rpi must exit 0 without --fail-on: {stderr}");
+    assert!(
+        !stderr.contains("regression") && !stderr.contains("trend:"),
+        "no trend verdict may be derived from an unusable baseline: {stderr}"
+    );
+    assert!(
+        stderr.contains("warn:") && stderr.contains("finding_count"),
+        "a warning naming the missing key is expected: {stderr}"
+    );
+}
+
+#[test]
+fn baseline_without_metrics_warns_instead_of_regression() {
+    assert_unusable_baseline("nometrics", serde_json::json!({}));
+}
+
+#[test]
+fn baseline_without_finding_count_warns_instead_of_regression() {
+    assert_unusable_baseline("nocount", serde_json::json!({"metrics": {}}));
+}
+
+#[test]
+fn baseline_with_non_integer_finding_count_warns() {
+    assert_unusable_baseline(
+        "strcount",
+        serde_json::json!({"metrics": {"finding_count": "many"}}),
+    );
+}
+
 // --- edge-case fixtures ---
 
 fn fixture_path(name: &str) -> PathBuf {
