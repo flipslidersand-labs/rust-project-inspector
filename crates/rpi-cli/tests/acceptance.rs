@@ -233,8 +233,8 @@ fn baseline_no_change_when_equal() {
 /// #56: a baseline that parses but lacks `metrics.finding_count` must not be
 /// treated as "0 findings" (which would report a bogus regression). It warns
 /// instead, and still exits 0 without `--fail-on`.
-fn assert_unusable_baseline(label: &str, prior: serde_json::Value) {
-    let (ok, stderr) = run_with_baseline(label, &prior);
+fn assert_unusable_baseline(name: &str) {
+    let (ok, stderr) = run_with_baseline_file(name);
     assert!(ok, "rpi must exit 0 without --fail-on: {stderr}");
     assert!(
         !stderr.contains("regression") && !stderr.contains("trend:"),
@@ -248,20 +248,61 @@ fn assert_unusable_baseline(label: &str, prior: serde_json::Value) {
 
 #[test]
 fn baseline_without_metrics_warns_instead_of_regression() {
-    assert_unusable_baseline("nometrics", serde_json::json!({}));
+    assert_unusable_baseline("no_metrics.json");
 }
 
 #[test]
 fn baseline_without_finding_count_warns_instead_of_regression() {
-    assert_unusable_baseline("nocount", serde_json::json!({"metrics": {}}));
+    assert_unusable_baseline("no_count.json");
 }
 
 #[test]
 fn baseline_with_non_integer_finding_count_warns() {
-    assert_unusable_baseline(
-        "strcount",
-        serde_json::json!({"metrics": {"finding_count": "many"}}),
+    assert_unusable_baseline("str_count.json");
+}
+
+/// Run the real `rpi` binary against the `multi` fixture with a checked-in
+/// baseline from `tests/fixtures/baseline/<name>`; returns `(exit ok, stderr)`.
+/// `multi` currently yields 4 findings, all `warn`.
+fn run_with_baseline_file(name: &str) -> (bool, String) {
+    let path = fixture_path("baseline").join(name);
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_rpi"))
+        .args(["inspect"])
+        .arg(fixture())
+        .arg("--baseline")
+        .arg(path)
+        .output()
+        .expect("rpi binary must be runnable");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// #56: same finding count but a milder baseline mix is a regression.
+#[test]
+fn baseline_same_count_but_worse_severity_is_regression() {
+    let (ok, stderr) = run_with_baseline_file("multi_milder_same_count.json");
+    assert!(ok, "{stderr}");
+    assert!(
+        stderr.contains("regression (severity worsened)"),
+        "{stderr}"
     );
+    assert!(stderr.contains("warn 0→4"), "{stderr}");
+}
+
+#[test]
+fn baseline_same_mix_is_no_change() {
+    let (ok, stderr) = run_with_baseline_file("multi_same_mix.json");
+    assert!(ok, "{stderr}");
+    assert!(stderr.contains("= no change"), "{stderr}");
+}
+
+#[test]
+fn baseline_old_format_reports_severity_not_comparable() {
+    let (ok, stderr) = run_with_baseline_file("old_format_4.json");
+    assert!(ok, "{stderr}");
+    assert!(stderr.contains("severity: not comparable"), "{stderr}");
 }
 
 // --- edge-case fixtures ---
