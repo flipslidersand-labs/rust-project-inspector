@@ -94,14 +94,50 @@ pub fn trend(current: &Report, baseline: &serde_json::Value) -> Result<String, S
         .and_then(|v| v.as_i64())
         .ok_or("baseline has no integer metrics.finding_count (not a rpi JSON report?)")?;
     let delta = cur - base;
-    let (arrow, verdict) = match delta.cmp(&0) {
+    let (mut arrow, mut verdict) = match delta.cmp(&0) {
         std::cmp::Ordering::Greater => ("▲", "regression"),
         std::cmp::Ordering::Less => ("▼", "improvement"),
         std::cmp::Ordering::Equal => ("=", "no change"),
     };
-    Ok(format!(
-        "trend: findings {base} → {cur} ({delta:+}) {arrow} {verdict}"
-    ))
+    let (ce, cw, ci) = severity_counts(current);
+    let mut line = format!("trend: findings {base} → {cur} ({delta:+}) {arrow} {verdict}");
+    match baseline_severity_counts(baseline) {
+        Some((be, bw, bi)) => {
+            line.push_str(&format!(
+                "\n  severity: error {be}→{ce}, warn {bw}→{cw}, info {bi}→{ci}"
+            ));
+            // Same total but a worse mix (more errors, or more warns at equal
+            // errors) is still a regression (#56).
+            if delta == 0 && (ce, cw) > (be, bw) {
+                arrow = "▲";
+                verdict = "regression (severity worsened)";
+                line = format!(
+                    "trend: findings {base} → {cur} ({delta:+}) {arrow} {verdict}{}",
+                    line.split_once('\n')
+                        .map(|(_, r)| format!("\n{r}"))
+                        .unwrap_or_default()
+                );
+            }
+        }
+        None => line.push_str("\n  severity: not comparable (baseline has no findings[].severity)"),
+    }
+    Ok(line)
+}
+
+/// (error, warn, info) counts from a baseline's `findings[].severity`, or
+/// `None` for an old-format baseline without them.
+fn baseline_severity_counts(baseline: &serde_json::Value) -> Option<(usize, usize, usize)> {
+    let findings = baseline.get("findings")?.as_array()?;
+    let (mut e, mut w, mut i) = (0, 0, 0);
+    for f in findings {
+        match f.get("severity")?.as_str()? {
+            "error" => e += 1,
+            "warn" => w += 1,
+            "info" => i += 1,
+            _ => return None,
+        }
+    }
+    Some((e, w, i))
 }
 
 fn sarif_level(sev: Severity) -> &'static str {
@@ -286,6 +322,30 @@ mod tests {
         assert!(trend(&cur, &base_more).unwrap().contains("improvement"));
         assert!(trend(&cur, &base_less).unwrap().contains("regression"));
         assert!(trend(&cur, &base_less).unwrap().contains("(+2)"));
+    }
+
+    #[test]
+    fn trend_flags_severity_worsening_at_equal_count() {
+        let cur = report(vec![finding("a", Severity::Error, "k")]);
+        let base: serde_json::Value = serde_json::json!({
+            "metrics":{"finding_count":1},
+            "findings":[{"severity":"warn"}]
+        });
+        let t = trend(&cur, &base).unwrap();
+        assert!(t.contains("regression (severity worsened)"), "{t}");
+        assert!(t.contains("error 0→1, warn 1→0"), "{t}");
+    }
+
+    #[test]
+    fn trend_equal_mix_is_no_change_and_old_format_is_not_comparable() {
+        let cur = report(vec![finding("a", Severity::Warn, "k")]);
+        let same: serde_json::Value = serde_json::json!({
+            "metrics":{"finding_count":1},
+            "findings":[{"severity":"warn"}]
+        });
+        assert!(trend(&cur, &same).unwrap().contains("no change"));
+        let old: serde_json::Value = serde_json::json!({"metrics":{"finding_count":1}});
+        assert!(trend(&cur, &old).unwrap().contains("not comparable"));
     }
 
     #[test]
