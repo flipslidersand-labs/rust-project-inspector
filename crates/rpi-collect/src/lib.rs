@@ -351,7 +351,12 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        //  does not follow symlinks; skip them to avoid cycles.
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
             if path.file_name().is_some_and(|n| n == "target") {
                 continue;
             }
@@ -427,6 +432,29 @@ mod tests {
         );
         // The fixture is a leaf crate: no intra-workspace deps.
         assert!(krate.workspace_deps.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_does_not_follow_symlinks() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("rpi_issue64_symlink_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join("a.rs"),
+            "fn a() {}
+",
+        )
+        .unwrap();
+        // Cycle: src/loop -> root, and a symlink to a .rs file.
+        symlink(&root, src.join("loop")).unwrap();
+        symlink(src.join("a.rs"), src.join("link.rs")).unwrap();
+
+        let files = collect_rs_files(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(files, vec![src.join("a.rs")]);
     }
 
     #[test]
