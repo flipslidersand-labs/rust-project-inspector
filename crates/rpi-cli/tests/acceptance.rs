@@ -410,3 +410,60 @@ impl Drop for RemoveOnDrop {
         std::fs::remove_dir_all(&self.0).ok();
     }
 }
+
+// ---------------------------------------------------------------------------
+// --fail-on exit-code acceptance tests (#63)
+// ---------------------------------------------------------------------------
+
+/// Run the real `rpi` binary against the `multi` fixture with extra `args`
+/// (JSON output); returns `(exit code, stdout, stderr)`.
+/// `multi` yields 4 findings, all `warn` and none `error`.
+fn run_with_args(args: &[&str]) -> (Option<i32>, String, String) {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_rpi"))
+        .args(["inspect"])
+        .arg(fixture())
+        .args(["--format", "json"])
+        .args(args)
+        .output()
+        .expect("rpi binary must be runnable");
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn fail_on_warn_exits_1_after_printing_the_report() {
+    let (code, stdout, stderr) = run_with_args(&["--fail-on", "warn"]);
+    assert_eq!(
+        code,
+        Some(1),
+        "warn findings must fail --fail-on warn: {stderr}"
+    );
+    // The report is emitted before exiting, so CI still gets the findings.
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout must hold the full JSON report");
+    assert!(
+        stdout.contains("test-gap"),
+        "report must list findings: {stdout}"
+    );
+    assert!(report.is_object());
+}
+
+#[test]
+fn fail_on_error_exits_0_when_fixture_has_only_warnings() {
+    let (code, stdout, stderr) = run_with_args(&["--fail-on", "error"]);
+    assert_eq!(code, Some(0), "no error findings in multi: {stderr}");
+    assert!(
+        stdout.contains("test-gap"),
+        "report still printed: {stdout}"
+    );
+}
+
+#[test]
+fn no_fail_on_exits_0_despite_findings() {
+    let (code, stdout, stderr) = run_with_args(&[]);
+    assert_eq!(code, Some(0), "without --fail-on exit must be 0: {stderr}");
+    assert!(stdout.contains("test-gap"), "report printed: {stdout}");
+}
