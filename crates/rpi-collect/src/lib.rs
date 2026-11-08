@@ -582,6 +582,41 @@ mod tests {
     }
 
     #[test]
+    fn hyphenated_rename_keeps_toml_key_as_reference_name() {
+        let dir = scratch("renamed_dep_hyphen");
+        std::fs::create_dir_all(dir.join("bar/src")).unwrap();
+        std::fs::create_dir_all(dir.join("app/src")).unwrap();
+        std::fs::write(
+            dir.join("bar/Cargo.toml"),
+            "[package]\nname = \"bar\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("bar/src/lib.rs"), "pub fn b() {}\n").unwrap();
+        std::fs::write(
+            dir.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
+             [dependencies]\nmy-foo = { package = \"bar\", path = \"../bar\" }\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("app/src/lib.rs"), "pub use my_foo::b;\n").unwrap();
+
+        let ctx = collect(&dir.join("app"), CollectOptions::default());
+        std::fs::remove_dir_all(&dir).ok();
+        let ctx = ctx.expect("collection must succeed");
+
+        // Stored as written in TOML; dep-hygiene normalizes `-` to `_` itself.
+        let krate = &ctx.crates[0];
+        assert_eq!(krate.external_deps, vec!["my-foo".to_string()]);
+        assert_eq!(
+            krate
+                .external_dep_packages
+                .get("my-foo")
+                .map(String::as_str),
+            Some("bar")
+        );
+    }
+
+    #[test]
     fn collect_error_mentions_workspace_path() {
         match collect(
             std::path::Path::new("/no/such/workspace"),
