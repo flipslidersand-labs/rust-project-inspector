@@ -39,8 +39,19 @@ pub fn collect(root: &Path, opts: CollectOptions) -> Result<Context> {
 fn collect_inner(root: &Path, opts: CollectOptions) -> Result<Context> {
     // Full metadata (deps resolved) so `dep-hygiene` can inspect the whole
     // graph for duplicate versions.
+    //
+    // Run from a neutral directory and point at the target via `--manifest-path`
+    // so the *target's* `.cargo/config.toml` (`build.rustc`, ...) and
+    // `rust-toolchain.toml` are not picked up and executed (#100). Trust
+    // boundary: cargo still reads the target's manifest and build scripts are
+    // never run by `cargo metadata`.
+    let manifest = root
+        .canonicalize()
+        .with_context(|| format!("cannot resolve {}", root.display()))?
+        .join("Cargo.toml");
     let metadata = MetadataCommand::new()
-        .current_dir(root)
+        .current_dir(std::env::temp_dir())
+        .manifest_path(manifest)
         .exec()
         .context("failed to run `cargo metadata`")?;
 
@@ -241,18 +252,33 @@ fn git_toplevel(dir: &Path) -> Option<PathBuf> {
 /// is printed and the command is not run. Other failures warn once and return
 /// no vulns rather than aborting the inspection.
 fn run_cargo_audit(root: &Path) -> Vec<AuditVuln> {
+    run_cargo_audit_with(root, search_path().as_deref())
+}
+
+fn run_cargo_audit_with(root: &Path, search: Option<&OsStr>) -> Vec<AuditVuln> {
     if let Some(notice) = skip_notice(
         "audit-bridge",
         "cargo-audit",
         "install with `cargo install cargo-audit`",
-        search_path().as_deref(),
+        search,
     ) {
         eprintln!("{notice}");
         return Vec::new();
     }
-    let output = Command::new("cargo")
-        .args(["audit", "--json"])
-        .current_dir(root)
+    // Call the binary directly: `cargo audit` would let the target's
+    // `[alias] audit = ...` run arbitrary code (#101). Neutral cwd + explicit
+    // lockfile keep the target's `.cargo/config.toml` out of the picture.
+    let Some(bin) = search.and_then(|d| which::which_in("cargo-audit", Some(d), ".").ok()) else {
+        return Vec::new();
+    };
+    let lock = root
+        .canonicalize()
+        .unwrap_or_else(|_| root.to_path_buf())
+        .join("Cargo.lock");
+    let output = Command::new(bin)
+        .args(["audit", "--json", "--file"])
+        .arg(lock)
+        .current_dir(std::env::temp_dir())
         .output();
     match output {
         Ok(out) if !out.stdout.is_empty() => {
@@ -956,5 +982,88 @@ mod tests {
     #[test]
     fn config_default_timeout_is_thirty_seconds() {
         assert_eq!(rpi_core::Config::default().churn_git_timeout_secs, 30);
+    }
+
+    #[cfg(unix)]
+    fn write_exec(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(path, body).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// #100: a target's `.cargo/config.toml` `build.rustc` must not run.
+    #[cfg(unix)]
+    #[test]
+    fn untrusted_build_rustc_is_not_executed_by_collect() {
+        let root = std::env::temp_dir().join(format!("rpi_issue100_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"victim\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+        let marker = root.join("PWNED");
+        let evil = root.join("evil-rustc.sh");
+        write_exec(
+            &evil,
+            &format!(
+                "#!/bin/sh\ntouch '{}'\nexec rustc \"$@\"\n",
+                marker.display()
+            ),
+        );
+        fs::write(
+            root.join(".cargo/config.toml"),
+            format!("[build]\nrustc = \"{}\"\n", evil.display()),
+        )
+        .unwrap();
+
+        let result = collect(&root, CollectOptions::default());
+        let ran = marker.exists();
+        let _ = fs::remove_dir_all(&root);
+        assert!(result.is_ok(), "collect failed: {:?}", result.err());
+        assert!(!ran, "target's build.rustc was executed");
+    }
+
+    /// #101: audit must call `cargo-audit` directly (not via `cargo`, whose
+    /// alias the target controls), from a neutral cwd, passing the lockfile.
+    #[cfg(unix)]
+    #[test]
+    fn audit_calls_cargo_audit_directly_from_neutral_cwd() {
+        let base = std::env::temp_dir().join(format!("rpi_issue101_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let root = base.join("target_repo");
+        let bin = base.join("bin");
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[alias]\naudit = \"run --bin evil --\"\n",
+        )
+        .unwrap();
+        let log = base.join("log");
+        write_exec(
+            &bin.join("cargo-audit"),
+            &format!(
+                "#!/bin/sh\necho \"cwd=$(pwd)\" > '{0}'\necho \"args=$*\" >> '{0}'\necho '{{\"vulnerabilities\":{{\"list\":[]}}}}'\n",
+                log.display()
+            ),
+        );
+
+        let vulns = run_cargo_audit_with(&root, Some(bin.as_os_str()));
+        let logged = fs::read_to_string(&log).unwrap_or_default();
+        let root_str = root.canonicalize().unwrap().display().to_string();
+        let _ = fs::remove_dir_all(&base);
+        assert!(vulns.is_empty());
+        assert!(
+            !logged.contains(&format!("cwd={root_str}")),
+            "ran inside target: {logged}"
+        );
+        assert!(
+            logged.contains(&format!("args=audit --json --file {root_str}/Cargo.lock")),
+            "unexpected invocation: {logged}"
+        );
     }
 }
