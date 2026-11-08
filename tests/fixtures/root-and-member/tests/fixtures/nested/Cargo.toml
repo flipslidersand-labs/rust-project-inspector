@@ -1,0 +1,7 @@
+# Separate nested workspace; must not be collected into root_pkg.
+[package]
+name = "nested"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
