@@ -475,6 +475,33 @@ fn parse_file(path: &Path) -> Option<SourceFile> {
     }
 }
 
+/// Maximum bracket nesting accepted before handing a file to `syn`.
+///
+/// `syn`/`proc-macro2` recurse per nesting level and overflow the stack (a
+/// process abort, not an `Err`) at around 5000 levels; 2000 levels were
+/// observed to pass. Real code stays far below 100 levels, so 256 leaves a wide
+/// margin on small thread stacks while never rejecting realistic sources.
+const MAX_BRACKET_DEPTH: usize = 256;
+
+/// Greatest simultaneous `(`/`[`/`{` depth, by a plain character scan.
+///
+/// Strings, comments and char literals are deliberately not handled: this can
+/// only over-estimate for odd inputs, which errs on the safe side.
+fn max_bracket_depth(src: &str) -> usize {
+    let (mut depth, mut max) = (0usize, 0usize);
+    for b in src.bytes() {
+        match b {
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                max = max.max(depth);
+            }
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    max
+}
+
 /// Like [`parse_file`] but returns the warning text instead of printing it.
 ///
 /// The message always carries the file path; for syntax errors it also carries
@@ -482,6 +509,12 @@ fn parse_file(path: &Path) -> Option<SourceFile> {
 fn try_parse_file(path: &Path) -> Result<SourceFile, String> {
     let content = fs::read_to_string(path)
         .map_err(|e| format!("warn: skipping {} (read error: {e})", path.display()))?;
+    if max_bracket_depth(&content) > MAX_BRACKET_DEPTH {
+        return Err(format!(
+            "warn: skipping {} (nesting too deep)",
+            path.display()
+        ));
+    }
     let loc = content.lines().count();
     let ast = syn::parse_file(&content).map_err(|e| {
         let start = e.span().start();
@@ -715,6 +748,40 @@ mod tests {
             "warning must mention the line: {msg}"
         );
         assert!(parse_file(&path).is_none());
+    }
+
+    fn nested_parens_source(depth: usize) -> String {
+        format!(
+            "fn f() {{ let _ = {}1{}; }}\n",
+            "(".repeat(depth),
+            ")".repeat(depth)
+        )
+    }
+
+    #[test]
+    fn deeply_nested_file_is_skipped_not_crashed() {
+        let dir = scratch("deep_nesting");
+        let path = dir.join("deep.rs");
+        std::fs::write(&path, nested_parens_source(5000)).unwrap();
+        let result = try_parse_file(&path);
+        std::fs::remove_dir_all(&dir).ok();
+        let msg = result.err().expect("deeply nested file must be skipped");
+        assert!(msg.contains("deep.rs"), "{msg}");
+        assert!(msg.contains("nesting too deep"), "{msg}");
+    }
+
+    #[test]
+    fn moderately_nested_and_normal_files_still_parse() {
+        let dir = scratch("ok_nesting");
+        let ok = dir.join("ok.rs");
+        std::fs::write(&ok, "fn main() { let _ = vec![(1, [2])]; }\n").unwrap();
+        let nested = dir.join("nested.rs");
+        std::fs::write(&nested, nested_parens_source(50)).unwrap();
+        let r1 = try_parse_file(&ok);
+        let r2 = try_parse_file(&nested);
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(r1.is_ok());
+        assert!(r2.is_ok());
     }
 
     #[test]
