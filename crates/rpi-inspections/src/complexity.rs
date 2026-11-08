@@ -323,6 +323,15 @@ mod tests {
     }
 
     #[test]
+    fn impl_and_trait_fns_inside_fn_are_not_counted_in_outer() {
+        let src = "fn o() { struct S; impl S { fn m(&self, a: bool) { if a {} } } \
+                   trait T { fn d(a: bool) { if a {} } } }";
+        assert_eq!(score_of(src, "o"), 1);
+        assert_eq!(score_of(src, "m"), 2);
+        assert_eq!(score_of(src, "d"), 2);
+    }
+
+    #[test]
     fn closure_decisions_count_toward_enclosing_fn() {
         // base(1) + if inside closure(1) = 2
         let src = "fn f() { let g = |x: bool| if x { 1 } else { 2 }; let _ = g(true); }";
