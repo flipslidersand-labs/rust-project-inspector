@@ -145,8 +145,10 @@ fn collect_churn(root: &Path, timeout: Duration) -> HashMap<PathBuf, usize> {
 /// [`collect_churn`] with the git invocation injected (`git` is the program and
 /// any leading arguments), so tests can substitute a stub.
 fn collect_churn_with(mut git: Command, root: &Path, timeout: Duration) -> HashMap<PathBuf, usize> {
+    // core.quotepath=false: otherwise git C-quotes non-ASCII paths ("\346...")
+    // and they would be dropped by the `.rs` filter below.
     let mut child = match git
-        .args(["-C"])
+        .args(["-c", "core.quotepath=false", "-C"])
         .arg(root)
         .args(["log", "--name-only", "--pretty=format:"])
         .stdout(Stdio::piped())
@@ -246,7 +248,10 @@ fn run_cargo_audit(root: &Path) -> Vec<AuditVuln> {
         .output();
     match output {
         Ok(out) if !out.stdout.is_empty() => {
-            parse_audit_json(&String::from_utf8_lossy(&out.stdout))
+            parse_audit_json(&String::from_utf8_lossy(&out.stdout)).unwrap_or_else(|warning| {
+                eprintln!("{warning}");
+                Vec::new()
+            })
         }
         Ok(out) => {
             if !out.stderr.is_empty() {
@@ -291,19 +296,24 @@ fn skip_notice(inspection: &str, tool: &str, hint: &str, search: Option<&OsStr>)
 }
 
 /// Parse the `cargo audit --json` document into [`AuditVuln`]s. Tolerant of
-/// missing fields so schema drift degrades gracefully.
-fn parse_audit_json(text: &str) -> Vec<AuditVuln> {
-    let Ok(doc) = serde_json::from_str::<serde_json::Value>(text) else {
-        return Vec::new();
-    };
+/// missing per-entry fields. Unparseable JSON or a missing
+/// `vulnerabilities.list` is an `Err` holding a `warn: ...` message, so the
+/// caller can tell it apart from a genuinely clean audit (`Ok(vec![])`).
+fn parse_audit_json(text: &str) -> Result<Vec<AuditVuln>, String> {
+    let doc = serde_json::from_str::<serde_json::Value>(text).map_err(|e| {
+        format!("warn: `cargo audit` output is not valid JSON ({e}); skipping audit-bridge")
+    })?;
     let list = doc
         .get("vulnerabilities")
         .and_then(|v| v.get("list"))
         .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+        .ok_or_else(|| {
+            "warn: `cargo audit` output lacks vulnerabilities.list; skipping audit-bridge"
+                .to_string()
+        })?;
 
-    list.iter()
+    Ok(list
+        .iter()
         .map(|v| {
             let s = |ptr: &[&str]| -> String {
                 let mut cur = v;
@@ -322,7 +332,7 @@ fn parse_audit_json(text: &str) -> Vec<AuditVuln> {
                 title: s(&["advisory", "title"]),
             }
         })
-        .collect()
+        .collect())
 }
 
 /// Load `rpi.toml` from the workspace root, falling back to defaults when the
@@ -357,7 +367,12 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        //  does not follow symlinks; skip them to avoid cycles.
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
             if path.file_name().is_some_and(|n| n == "target") {
                 continue;
             }
@@ -435,6 +450,29 @@ mod tests {
         assert!(krate.workspace_deps.is_empty());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn walk_does_not_follow_symlinks() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("rpi_issue64_symlink_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join("a.rs"),
+            "fn a() {}
+",
+        )
+        .unwrap();
+        // Cycle: src/loop -> root, and a symlink to a .rs file.
+        symlink(&root, src.join("loop")).unwrap();
+        symlink(src.join("a.rs"), src.join("link.rs")).unwrap();
+
+        let files = collect_rs_files(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(files, vec![src.join("a.rs")]);
+    }
+
     #[test]
     fn skips_target_directory() {
         let files = collect_rs_files(&fixture());
@@ -454,7 +492,7 @@ mod tests {
                   "package": { "name": "badcrate", "version": "1.2.3" } }
             ]}
         }"#;
-        let vulns = parse_audit_json(json);
+        let vulns = parse_audit_json(json).unwrap();
         assert_eq!(vulns.len(), 1);
         assert_eq!(vulns[0].id, "RUSTSEC-2021-0001");
         assert_eq!(vulns[0].package, "badcrate");
@@ -463,9 +501,20 @@ mod tests {
     }
 
     #[test]
-    fn audit_json_tolerates_empty_and_garbage() {
-        assert!(parse_audit_json("not json").is_empty());
-        assert!(parse_audit_json("{}").is_empty());
+    fn audit_json_garbage_and_missing_list_are_reported() {
+        let e = parse_audit_json("not json").unwrap_err();
+        assert!(e.starts_with("warn: "), "{e}");
+        let e = parse_audit_json("{}").unwrap_err();
+        assert!(
+            e.starts_with("warn: ") && e.contains("vulnerabilities.list"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn audit_json_empty_list_is_clean_not_warned() {
+        let json = r#"{ "vulnerabilities": { "count": 0, "list": [] } }"#;
+        assert_eq!(parse_audit_json(json).unwrap().len(), 0);
     }
 
     /// Fresh scratch dir under the system temp dir (removed by the caller).
@@ -689,6 +738,43 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         let ok = churn.iter().find(|(p, _)| p.ends_with("src/ok.rs"));
         assert_eq!(ok.map(|(_, n)| *n), Some(2), "UTF-8 paths lost: {churn:?}");
+    }
+
+    #[test]
+    fn collect_churn_counts_non_ascii_paths() {
+        // git quotes non-ASCII paths ("\346...") unless core.quotepath=false.
+        if Command::new("git").arg("--version").output().is_err() {
+            return; // git unavailable: nothing to exercise
+        }
+        let dir = std::env::temp_dir().join(format!("rpi_churn_quotepath_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("日本語")).unwrap();
+        std::fs::write(dir.join("日本語/モジュール.rs"), "fn a() {}\n").unwrap();
+        let git = |args: &[&str]| {
+            let ok = Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(["-c", "commit.gpgsign=false", "-C"])
+                .arg(&dir)
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            assert!(ok, "git {args:?} failed");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "日本語/モジュール.rs"]);
+        git(&["commit", "-q", "-m", "init"]);
+
+        let churn = collect_churn(&dir, Duration::from_secs(10));
+        std::fs::remove_dir_all(&dir).ok();
+        let hit = churn
+            .iter()
+            .find(|(p, _)| p.ends_with("日本語/モジュール.rs"));
+        assert_eq!(
+            hit.map(|(_, n)| *n),
+            Some(1),
+            "non-ASCII path lost: {churn:?}"
+        );
     }
 
     #[test]
