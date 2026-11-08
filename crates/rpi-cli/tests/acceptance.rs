@@ -410,3 +410,27 @@ impl Drop for RemoveOnDrop {
         std::fs::remove_dir_all(&self.0).ok();
     }
 }
+
+/// #62: `a --dev-dep--> b --normal--> a` is legal in Cargo (dev-dependencies are
+/// not part of the build graph), so it must not be reported as a cycle.
+#[test]
+fn dev_dependency_cycle_is_not_reported_as_cycle() {
+    let ctx = rpi_collect::collect(&fixture_path("dev-cycle"), Default::default())
+        .expect("collect dev-cycle fixture");
+    let a = ctx.crates.iter().find(|c| c.name == "dc_a").expect("dc_a");
+    assert!(
+        a.workspace_deps.is_empty(),
+        "dev-dependency must not be a workspace edge: {:?}",
+        a.workspace_deps
+    );
+    let findings: Vec<Finding> = rpi_inspections::all()
+        .iter()
+        .flat_map(|i| i.run(&ctx))
+        .collect();
+    assert!(
+        !findings
+            .iter()
+            .any(|f| f.inspection == "workspace-graph" && f.severity == Severity::Error),
+        "no cycle Error expected: {findings:?}"
+    );
+}

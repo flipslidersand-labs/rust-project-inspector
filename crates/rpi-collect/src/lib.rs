@@ -62,9 +62,15 @@ fn collect_inner(root: &Path, opts: CollectOptions) -> Result<Context> {
         let mut workspace_deps = Vec::new();
         let mut external_deps = Vec::new();
         for dep in &pkg.dependencies {
+            // Only normal dependencies form the build graph. A dev/build edge
+            // between members (a --dev--> b --normal--> a) is legal in Cargo and
+            // must not be read as a cycle (#62).
+            if dep.kind != cargo_metadata::DependencyKind::Normal {
+                continue;
+            }
             if member_names.contains(&dep.name) {
                 workspace_deps.push(dep.name.clone());
-            } else if dep.kind == cargo_metadata::DependencyKind::Normal {
+            } else {
                 external_deps.push(dep.name.clone());
             }
         }
