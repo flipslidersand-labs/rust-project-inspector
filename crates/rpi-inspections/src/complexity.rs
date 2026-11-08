@@ -235,4 +235,86 @@ mod tests {
         assert_eq!(f.len(), 1);
         assert!(f[0].message.contains("`big`"));
     }
+
+    fn score_of(src: &str, name: &str) -> usize {
+        function_complexities(&file(src))
+            .into_iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("fn `{name}` not collected"))
+            .1
+    }
+
+    #[test]
+    fn while_adds_one() {
+        // base(1) + while(1) = 2
+        assert_eq!(score_of("fn f(c: bool) { while c {} }", "f"), 2);
+    }
+
+    #[test]
+    fn loop_adds_one() {
+        // base(1) + loop(1) = 2
+        assert_eq!(score_of("fn f() { loop { break; } }", "f"), 2);
+    }
+
+    #[test]
+    fn try_operator_adds_one() {
+        // base(1) + `?`(1) = 2
+        let src = "fn f() -> Option<i32> { let x = g()?; Some(x) } fn g() -> Option<i32> { None }";
+        assert_eq!(score_of(src, "f"), 2);
+    }
+
+    #[test]
+    fn logical_or_adds_one() {
+        // base(1) + `||`(1) = 2
+        assert_eq!(
+            score_of("fn f(a: bool, b: bool) -> bool { a || b }", "f"),
+            2
+        );
+    }
+
+    #[test]
+    fn impl_method_is_collected_with_name() {
+        // base(1) + while(1) = 2, reported under the method name.
+        let src = "struct S; impl S { fn m(&self, c: bool) { while c {} } }";
+        let c = function_complexities(&file(src));
+        assert_eq!(c, vec![("m".to_string(), 2)]);
+    }
+
+    #[test]
+    fn trait_default_method_is_collected_and_declaration_is_not() {
+        // `d` has a body: base(1) + if(1) = 2. `n` is a bodiless declaration: absent.
+        let src = "trait T { fn d(&self, a: bool) { if a {} } fn n(&self); }";
+        let c = function_complexities(&file(src));
+        assert_eq!(c, vec![("d".to_string(), 2)]);
+    }
+
+    #[test]
+    fn else_if_chain_adds_one_per_if() {
+        // base(1) + if(1) + else-if(1) = 3
+        let src = "fn f(a: bool, b: bool) { if a {} else if b {} }";
+        assert_eq!(score_of(src, "f"), 3);
+    }
+
+    #[test]
+    fn nested_fn_counts_toward_outer_and_itself() {
+        // inner: base(1) + if(1) = 2.
+        // outer: base(1) + inner's if(1) = 2 (documented approximation).
+        let src = "fn outer(a: bool) { fn inner(b: bool) { if b {} } let _ = a; }";
+        assert_eq!(score_of(src, "inner"), 2);
+        assert_eq!(score_of(src, "outer"), 2);
+    }
+
+    #[test]
+    fn closure_decisions_count_toward_enclosing_fn() {
+        // base(1) + if inside closure(1) = 2
+        let src = "fn f() { let g = |x: bool| if x { 1 } else { 2 }; let _ = g(true); }";
+        assert_eq!(score_of(src, "f"), 2);
+    }
+
+    #[test]
+    fn match_guard_condition_operators_are_counted() {
+        // base(1) + 2 arms(2) + `&&` in guard(1) = 4
+        let src = "fn f(a: bool, b: bool) { match a { x if x && b => {} _ => {} } }";
+        assert_eq!(score_of(src, "f"), 4);
+    }
 }
