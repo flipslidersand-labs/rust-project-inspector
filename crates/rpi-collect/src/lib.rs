@@ -475,31 +475,186 @@ fn parse_file(path: &Path) -> Option<SourceFile> {
     }
 }
 
-/// Maximum bracket nesting accepted before handing a file to `syn`.
-///
-/// `syn`/`proc-macro2` recurse per nesting level and overflow the stack (a
-/// process abort, not an `Err`) at around 5000 levels; 2000 levels were
-/// observed to pass. Real code stays far below 100 levels, so 256 leaves a wide
-/// margin on small thread stacks while never rejecting realistic sources.
-const MAX_BRACKET_DEPTH: usize = 256;
+/// Stack size of the dedicated parser thread. The stack is reserved lazily
+/// (virtual memory only), so this is not resident memory. 5000-level inputs of
+/// every shape tried (worst: debug-build generics, ~60 KiB/level) fit; 1 GiB covers ~15k levels. Group depth beyond MAX_GROUP_DEPTH is stopped by
+/// the lexical backstop below before it gets here.
+const PARSER_STACK_BYTES: usize = 1024 * 1024 * 1024;
 
-/// Greatest simultaneous `(`/`[`/`{` depth, by a plain character scan.
-///
-/// Strings, comments and char literals are deliberately not handled: this can
-/// only over-estimate for odd inputs, which errs on the safe side.
-fn max_bracket_depth(src: &str) -> usize {
-    let (mut depth, mut max) = (0usize, 0usize);
-    for b in src.bytes() {
-        match b {
+/// Backstop for bracket nesting (macro token groups are not bounded by
+/// `syn`). Measured with a lexer-aware scan, so brackets inside strings,
+/// comments, chars and raw strings are ignored.
+const MAX_GROUP_DEPTH: usize = 512;
+
+/// The AST we hand to the inspections is walked recursively on ordinary
+/// stacks, so reject trees deeper than this (`syn`'s own parse limit is 128).
+const MAX_AST_DEPTH: usize = 128;
+
+/// Greatest `(`/`[`/`{` depth, skipping comments, string/char/raw-string
+/// literals and lifetimes.
+fn max_group_depth(src: &str) -> usize {
+    let b = src.as_bytes();
+    let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let (mut i, mut depth, mut max) = (0usize, 0usize, 0usize);
+    while i < b.len() {
+        match b[i] {
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                let mut nest = 1;
+                i += 2;
+                while i < b.len() && nest > 0 {
+                    if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
+                        nest += 1;
+                        i += 2;
+                    } else if b[i] == b'*' && b.get(i + 1) == Some(&b'/') {
+                        nest -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b'r' if i == 0
+                || !is_ident(b[i - 1])
+                || (i >= 1
+                    && matches!(b[i - 1], b'b' | b'c')
+                    && (i == 1 || !is_ident(b[i - 2]))) =>
+            {
+                let mut j = i + 1;
+                while b.get(j) == Some(&b'#') {
+                    j += 1;
+                }
+                if b.get(j) == Some(&b'"') {
+                    let hashes = j - i - 1;
+                    i = j + 1;
+                    while i < b.len() {
+                        if b[i] == b'"' && (0..hashes).all(|k| b.get(i + 1 + k) == Some(&b'#')) {
+                            i += 1 + hashes;
+                            break;
+                        }
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            b'\'' => {
+                // Char literal (`'x'`, `'\n'`) vs lifetime (`'a`).
+                if b.get(i + 1) == Some(&b'\\') {
+                    i += 2;
+                    while i < b.len() && b[i] != b'\'' {
+                        i += 1;
+                    }
+                    i += 1;
+                } else if let Some(c) = src.get(i + 1..).and_then(|r| r.chars().next()) {
+                    if b.get(i + 1 + c.len_utf8()) == Some(&b'\'') {
+                        i += 2 + c.len_utf8();
+                    } else {
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
             b'(' | b'[' | b'{' => {
                 depth += 1;
                 max = max.max(depth);
+                i += 1;
             }
-            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
-            _ => {}
+            b')' | b']' | b'}' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            _ => i += 1,
         }
     }
     max
+}
+
+/// Tracks the deepest expression/type/pattern/block/item nesting of an AST.
+#[derive(Default)]
+struct AstDepth {
+    cur: usize,
+    max: usize,
+}
+
+macro_rules! counted {
+    ($($method:ident => $func:ident: $ty:ty),* $(,)?) => {$(
+        fn $method(&mut self, n: &'ast $ty) {
+            self.cur += 1;
+            self.max = self.max.max(self.cur);
+            syn::visit::$func(self, n);
+            self.cur -= 1;
+        }
+    )*};
+}
+
+impl<'ast> syn::visit::Visit<'ast> for AstDepth {
+    counted! {
+        visit_expr => visit_expr: syn::Expr,
+        visit_type => visit_type: syn::Type,
+        visit_pat => visit_pat: syn::Pat,
+        visit_block => visit_block: syn::Block,
+        visit_item => visit_item: syn::Item,
+    }
+}
+
+/// Why the dedicated parser thread rejected a file (all `Send`).
+enum ParseFail {
+    Syntax {
+        line: usize,
+        col: usize,
+        msg: String,
+    },
+    TooDeep,
+}
+
+/// Parse `content` on a thread with a large stack and only report whether it
+/// is acceptable. The AST is dropped on that thread too (dropping a deep tree
+/// is recursive as well); the caller re-parses on its own thread, which is
+/// safe because only trees within [`MAX_AST_DEPTH`] get through. (Spans and
+/// `proc-macro2` values are not `Send`, so the tree cannot be handed back.)
+///
+/// A stack overflow cannot be caught; it aborts the process. The lexical
+/// backstop plus the large stack are what keep inputs away from that.
+fn check_on_big_stack(content: String) -> Result<Result<(), ParseFail>, String> {
+    let handle = thread::Builder::new()
+        .name("rpi-parse".into())
+        .stack_size(PARSER_STACK_BYTES)
+        .spawn(move || match syn::parse_file(&content) {
+            Err(e) => {
+                let start = e.span().start();
+                Err(ParseFail::Syntax {
+                    line: start.line,
+                    col: start.column + 1,
+                    msg: e.to_string(),
+                })
+            }
+            Ok(ast) => {
+                let mut v = AstDepth::default();
+                syn::visit::Visit::visit_file(&mut v, &ast);
+                if v.max > MAX_AST_DEPTH {
+                    Err(ParseFail::TooDeep)
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .map_err(|e| format!("could not start parser thread: {e}"))?;
+    handle
+        .join()
+        .map_err(|_| "parser thread panicked".to_string())
 }
 
 /// Like [`parse_file`] but returns the warning text instead of printing it.
@@ -509,22 +664,25 @@ fn max_bracket_depth(src: &str) -> usize {
 fn try_parse_file(path: &Path) -> Result<SourceFile, String> {
     let content = fs::read_to_string(path)
         .map_err(|e| format!("warn: skipping {} (read error: {e})", path.display()))?;
-    if max_bracket_depth(&content) > MAX_BRACKET_DEPTH {
-        return Err(format!(
-            "warn: skipping {} (nesting too deep)",
-            path.display()
-        ));
+    let too_deep = || format!("warn: skipping {} (nesting too deep)", path.display());
+    if max_group_depth(&content) > MAX_GROUP_DEPTH {
+        return Err(too_deep());
     }
     let loc = content.lines().count();
-    let ast = syn::parse_file(&content).map_err(|e| {
-        let start = e.span().start();
-        format!(
-            "warn: skipping {}:{}:{} (parse error: {e})",
-            path.display(),
-            start.line,
-            start.column + 1
-        )
-    })?;
+    match check_on_big_stack(content.clone())
+        .map_err(|e| format!("warn: skipping {} ({e})", path.display()))?
+    {
+        Ok(()) => {}
+        Err(ParseFail::TooDeep) => return Err(too_deep()),
+        Err(ParseFail::Syntax { line, col, msg }) => {
+            return Err(format!(
+                "warn: skipping {}:{line}:{col} (parse error: {msg})",
+                path.display()
+            ));
+        }
+    }
+    let ast = syn::parse_file(&content)
+        .map_err(|e| format!("warn: skipping {} (parse error: {e})", path.display()))?;
     Ok(SourceFile {
         path: path.to_path_buf(),
         loc,
@@ -782,6 +940,65 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         assert!(r1.is_ok());
         assert!(r2.is_ok());
+    }
+
+    /// `fn f() { let _ = <expr>; }` bodies that are 5000 levels deep in
+    /// different shapes, including ones that fool a naive bracket counter.
+    fn evasion_sources(n: usize) -> Vec<(&'static str, String)> {
+        let wrap = |e: String| format!("fn f() {{ let _ = {e}; }}\n");
+        let mut v = Vec::new();
+        for (name, open) in [
+            ("paren_str", "(\")\","),
+            ("paren_char", "(')',"),
+            ("paren_block_comment", "(/*)*/"),
+            ("paren_line_comment", "(// )\n"),
+            ("paren_closure_unary_ref", "(|| -!&"),
+        ] {
+            v.push((name, wrap(format!("{}1{}", open.repeat(n), ")".repeat(n)))));
+        }
+        v.push(("binop", wrap(format!("{}1", "1+".repeat(n)))));
+        v.push(("unary", wrap(format!("{}1", "-".repeat(n)))));
+        v.push(("ref", wrap(format!("{}1", "&".repeat(n)))));
+        v.push(("closure", wrap(format!("{}1", "||".repeat(n)))));
+        v.push(("elseif", wrap(format!("{}{{}}", "if a {} else ".repeat(n)))));
+        v.push(("field", wrap(format!("x{}", ".a".repeat(n)))));
+        v.push((
+            "generic",
+            format!("fn f(_: {}u8{}) {{}}\n", "Vec<".repeat(n), ">".repeat(n)),
+        ));
+        v.push(("reftype", format!("fn f(_: {}u8) {{}}\n", "&".repeat(n))));
+        v
+    }
+
+    #[test]
+    fn deep_evasion_shapes_never_crash() {
+        let dir = scratch("evasion");
+        for n in [250, 5000] {
+            for (name, src) in evasion_sources(n) {
+                let path = dir.join(format!("{name}_{n}.rs"));
+                std::fs::write(&path, src).unwrap();
+                // Ok or Err are both fine; the process must simply survive.
+                let _ = try_parse_file(&path);
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn brackets_in_literals_and_comments_do_not_cause_skips() {
+        let dir = scratch("literal_brackets");
+        let path = dir.join("lit.rs");
+        let src = format!(
+            "// {}\n/* {} */\nfn f() {{ let _ = \"{}\"; let _ = r#\"{}\"#; let _ = '('; let _: &'static str = \"\"; }}\n",
+            "(".repeat(600),
+            "[".repeat(600),
+            "{".repeat(600),
+            "(".repeat(600),
+        );
+        std::fs::write(&path, src).unwrap();
+        let r = try_parse_file(&path);
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(r.is_ok(), "{:?}", r.err());
     }
 
     #[test]
