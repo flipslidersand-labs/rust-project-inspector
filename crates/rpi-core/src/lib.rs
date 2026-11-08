@@ -127,7 +127,7 @@ pub struct AuditVuln {
 ///
 /// Uses `#[serde(default)]` so a partial `rpi.toml` only overrides the keys it
 /// names and everything else keeps its default.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
     /// A single file above this many lines is flagged by `module-size`.
@@ -149,6 +149,20 @@ pub struct Config {
     /// Maximum seconds to wait for `git log` before giving up and returning an
     /// empty churn map. Prevents hangs on repositories with very long histories.
     pub churn_git_timeout_secs: u64,
+}
+
+impl Config {
+    /// Every key accepted in `rpi.toml`; used to flag unknown keys (#35).
+    /// Keep in sync with the fields above.
+    pub const KNOWN_KEYS: &'static [&'static str] = &[
+        "module_size_loc",
+        "pub_surface_warn",
+        "unsafe_density_warn",
+        "coupling_warn",
+        "complexity_warn",
+        "churn_warn",
+        "churn_git_timeout_secs",
+    ];
 }
 
 impl Default for Config {
@@ -199,6 +213,17 @@ pub trait Inspection {
 
 #[cfg(test)]
 mod tests {
+    /// #35: `KNOWN_KEYS` must match the real `Config` fields.
+    #[test]
+    fn known_keys_match_config_fields() {
+        let v = serde_json::to_value(Config::default()).unwrap();
+        let mut fields: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        let mut known: Vec<&str> = Config::KNOWN_KEYS.to_vec();
+        fields.sort_unstable();
+        known.sort_unstable();
+        assert_eq!(fields, known);
+    }
+
     use super::*;
 
     #[test]

@@ -69,7 +69,9 @@ Sample output / 出力例:
 ## Configuration / 設定 (`rpi.toml`)
 
 Place in workspace root to override thresholds.  
-workspace ルートに置くと閾値を上書きできる（未指定キーは既定値）。
+workspace ルートに置くと閾値を上書きできる（未指定キーは既定値）。  
+Unknown keys (e.g. typos) are reported as a warning on stderr and ignored; known keys still apply.  
+未知のキー（typo 等）は stderr に警告を出して無視し、既知キーはそのまま適用される。
 
 | Key / キー | Default / 既定値 | Used by / 使用先 | Meaning / 意味 |
 |---|---|---|---|
