@@ -61,6 +61,7 @@ fn collect_inner(root: &Path, opts: CollectOptions) -> Result<Context> {
 
         let mut workspace_deps = Vec::new();
         let mut external_deps = Vec::new();
+        let mut external_dep_packages = HashMap::new();
         for dep in &pkg.dependencies {
             // Only normal dependencies form the build graph. A dev/build edge
             // between members (a --dev--> b --normal--> a) is legal in Cargo and
@@ -71,7 +72,13 @@ fn collect_inner(root: &Path, opts: CollectOptions) -> Result<Context> {
             if member_names.contains(&dep.name) {
                 workspace_deps.push(dep.name.clone());
             } else {
-                external_deps.push(dep.name.clone());
+                // Code refers to a renamed dependency by its rename; keep the
+                // original package name separately for display (#66).
+                let reference = dep.rename.as_deref().unwrap_or(&dep.name);
+                external_deps.push(reference.to_string());
+                if reference != dep.name {
+                    external_dep_packages.insert(reference.to_string(), dep.name.clone());
+                }
             }
         }
 
@@ -86,6 +93,7 @@ fn collect_inner(root: &Path, opts: CollectOptions) -> Result<Context> {
             root_dir,
             workspace_deps,
             external_deps,
+            external_dep_packages,
             files,
         });
     }
@@ -538,6 +546,38 @@ mod tests {
             names,
             vec!["lib.rs", "other.rs"],
             "good files must all be collected"
+        );
+    }
+
+    #[test]
+    fn renamed_dependency_is_keyed_by_reference_name() {
+        // `foo = { package = "bar" }` is referenced as `foo` in code (#66).
+        let dir = scratch("renamed_dep");
+        std::fs::create_dir_all(dir.join("bar/src")).unwrap();
+        std::fs::create_dir_all(dir.join("app/src")).unwrap();
+        std::fs::write(
+            dir.join("bar/Cargo.toml"),
+            "[package]\nname = \"bar\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("bar/src/lib.rs"), "pub fn b() {}\n").unwrap();
+        std::fs::write(
+            dir.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
+             [dependencies]\nfoo = { package = \"bar\", path = \"../bar\" }\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("app/src/lib.rs"), "pub use foo::b;\n").unwrap();
+
+        let ctx = collect(&dir.join("app"), CollectOptions::default());
+        std::fs::remove_dir_all(&dir).ok();
+        let ctx = ctx.expect("collection must succeed");
+
+        let krate = &ctx.crates[0];
+        assert_eq!(krate.external_deps, vec!["foo".to_string()]);
+        assert_eq!(
+            krate.external_dep_packages.get("foo").map(String::as_str),
+            Some("bar")
         );
     }
 
