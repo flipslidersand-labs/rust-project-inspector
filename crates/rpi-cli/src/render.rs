@@ -143,6 +143,7 @@ fn baseline_severity_counts(baseline: &serde_json::Value) -> Option<(usize, usiz
 
 /// Joins path components with '/' as required for a SARIF `artifactLocation.uri`,
 /// regardless of the host OS separator (#90).
+/// 相対パス専用。RootDir/Prefix を含むと '//' になるため、strip_prefix 成功後の相対パスにだけ使う。
 fn path_to_uri(p: &Path) -> String {
     p.components()
         .map(|c| c.as_os_str().to_string_lossy())
@@ -460,6 +461,17 @@ mod tests {
         let p = PathBuf::from_iter(["crates", "k", "a.rs"]);
         assert_eq!(path_to_uri(&p), "crates/k/a.rs");
         assert_eq!(path_to_uri(Path::new("a.rs")), "a.rs");
+    }
+
+    // `components()` drops a mid-path `.`, `display()` does not: pins the call site.
+    #[test]
+    fn sarif_uri_goes_through_path_to_uri() {
+        let v = sarif_one(Some("/repo/crates/./k/a.rs"), None);
+        let uri = v["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
+            ["artifactLocation"]["uri"]
+            .as_str()
+            .unwrap();
+        assert_eq!(uri, "crates/k/a.rs");
     }
 
     #[test]
