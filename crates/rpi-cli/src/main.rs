@@ -4,7 +4,7 @@
 //! collect → run inspections → aggregate → render.
 
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -49,6 +49,10 @@ enum Command {
         /// (regression/improvement) to stderr.
         #[arg(long, value_name = "FILE.json")]
         baseline: Option<PathBuf>,
+
+        /// Print each inspection's elapsed time to stderr.
+        #[arg(long)]
+        verbose: bool,
     },
 }
 
@@ -75,7 +79,8 @@ fn main() -> Result<()> {
             fail_on,
             audit,
             baseline,
-        } => inspect(path, format, fail_on, audit, baseline),
+            verbose,
+        } => inspect(path, format, fail_on, audit, baseline, verbose),
     }
 }
 
@@ -85,14 +90,27 @@ fn inspect(
     fail_on: Option<FailLevel>,
     audit: bool,
     baseline: Option<PathBuf>,
+    verbose: bool,
 ) -> Result<()> {
     let opts = rpi_collect::CollectOptions { run_audit: audit };
     let ctx = rpi_collect::collect(&path, opts)?;
 
-    let findings = rpi_inspections::all()
+    let inspections = rpi_inspections::all();
+    let width = inspections
         .iter()
-        .flat_map(|inspection| inspection.run(&ctx))
-        .collect();
+        .map(|i| i.name().len())
+        .max()
+        .unwrap_or(0);
+    let mut findings = Vec::new();
+    for inspection in &inspections {
+        let start = Instant::now();
+        findings.extend(inspection.run(&ctx));
+        // Timing goes to stderr only, so stdout stays byte-identical.
+        if verbose {
+            let ms = start.elapsed().as_millis();
+            eprintln!("[rpi] {:<width$}  {ms}ms", inspection.name());
+        }
+    }
 
     let report = Report::new(ctx.workspace, findings, now_rfc3339_ish());
 
