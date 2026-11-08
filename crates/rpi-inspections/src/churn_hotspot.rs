@@ -139,10 +139,10 @@ mod tests {
 
     #[test]
     fn complexity_one_over_threshold_fires() {
-        // cx 3 (two ifs) > complexity_warn 2, changes 3 == churn_warn => fires.
-        let f = ChurnHotspot.run(&ctx("fn f(a:bool){ if a{} if a{} }", 3));
+        // cx 3 (two ifs) > complexity_warn 2, changes 9 well above churn_warn => fires.
+        let f = ChurnHotspot.run(&ctx("fn f(a:bool){ if a{} if a{} }", 9));
         assert_eq!(f.len(), 1);
-        assert_eq!(f[0].metric, Some((3 * 3) as f64));
+        assert_eq!(f[0].metric, Some((9 * 3) as f64));
     }
 
     #[test]
