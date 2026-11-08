@@ -300,6 +300,7 @@ mod tests {
             root_dir: PathBuf::from(format!("/w/{name}")),
             workspace_deps: Vec::new(),
             external_deps: Vec::new(),
+            external_dep_packages: Default::default(),
             files,
         }
     }

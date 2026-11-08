@@ -47,7 +47,12 @@ impl Inspection for DepHygiene {
                             krate: Some(krate.name.clone()),
                             ..Default::default()
                         },
-                        message: format!("declared dependency `{dep}` appears unused (approx.)"),
+                        message: match krate.external_dep_packages.get(dep) {
+                            Some(pkg) => format!(
+                                "declared dependency `{dep}` (package `{pkg}`) appears unused (approx.)"
+                            ),
+                            None => format!("declared dependency `{dep}` appears unused (approx.)"),
+                        },
                         metric: None,
                     });
                 }
@@ -93,6 +98,7 @@ mod tests {
             root_dir: PathBuf::from(format!("/w/{name}")),
             workspace_deps: Vec::new(),
             external_deps: ext_deps.iter().map(|s| s.to_string()).collect(),
+            external_dep_packages: Default::default(),
             files: vec![SourceFile {
                 path: PathBuf::from("lib.rs"),
                 loc: src.lines().count(),
@@ -130,6 +136,23 @@ mod tests {
         let k = krate("k", &["foo-bar"], "use foo_bar::baz; fn f() {}");
         let f = DepHygiene.run(&ctx(vec![k], &[]));
         assert!(!f.iter().any(|x| x.message.contains("foo-bar")));
+    }
+
+    #[test]
+    fn renamed_dep_is_matched_by_reference_name() {
+        // `foo = { package = "bar" }`: collect stores `foo`; `use foo::..` uses it.
+        let mut k = krate("k", &["foo"], "use foo::baz; fn f() {}");
+        k.external_dep_packages.insert("foo".into(), "bar".into());
+        assert!(DepHygiene.run(&ctx(vec![k], &[])).is_empty());
+    }
+
+    #[test]
+    fn unused_renamed_dep_message_shows_package_name() {
+        let mut k = krate("k", &["foo"], "fn f() {}");
+        k.external_dep_packages.insert("foo".into(), "bar".into());
+        let f = DepHygiene.run(&ctx(vec![k], &[]));
+        assert_eq!(f.len(), 1);
+        assert!(f[0].message.contains("`foo`") && f[0].message.contains("`bar`"));
     }
 
     #[test]

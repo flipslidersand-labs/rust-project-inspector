@@ -70,6 +70,7 @@ fn cyclic_context() -> rpi_core::Context {
         root_dir: PathBuf::from(format!("/w/{name}")),
         workspace_deps: deps.iter().map(|s| s.to_string()).collect(),
         external_deps: Vec::new(),
+        external_dep_packages: Default::default(),
         files: Vec::new(),
     };
     rpi_core::Context {
