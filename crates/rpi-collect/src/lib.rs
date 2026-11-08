@@ -248,7 +248,10 @@ fn run_cargo_audit(root: &Path) -> Vec<AuditVuln> {
         .output();
     match output {
         Ok(out) if !out.stdout.is_empty() => {
-            parse_audit_json(&String::from_utf8_lossy(&out.stdout))
+            parse_audit_json(&String::from_utf8_lossy(&out.stdout)).unwrap_or_else(|warning| {
+                eprintln!("{warning}");
+                Vec::new()
+            })
         }
         Ok(out) => {
             if !out.stderr.is_empty() {
@@ -293,19 +296,24 @@ fn skip_notice(inspection: &str, tool: &str, hint: &str, search: Option<&OsStr>)
 }
 
 /// Parse the `cargo audit --json` document into [`AuditVuln`]s. Tolerant of
-/// missing fields so schema drift degrades gracefully.
-fn parse_audit_json(text: &str) -> Vec<AuditVuln> {
-    let Ok(doc) = serde_json::from_str::<serde_json::Value>(text) else {
-        return Vec::new();
-    };
+/// missing per-entry fields. Unparseable JSON or a missing
+/// `vulnerabilities.list` is an `Err` holding a `warn: ...` message, so the
+/// caller can tell it apart from a genuinely clean audit (`Ok(vec![])`).
+fn parse_audit_json(text: &str) -> Result<Vec<AuditVuln>, String> {
+    let doc = serde_json::from_str::<serde_json::Value>(text).map_err(|e| {
+        format!("warn: `cargo audit` output is not valid JSON ({e}); skipping audit-bridge")
+    })?;
     let list = doc
         .get("vulnerabilities")
         .and_then(|v| v.get("list"))
         .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+        .ok_or_else(|| {
+            "warn: `cargo audit` output lacks vulnerabilities.list; skipping audit-bridge"
+                .to_string()
+        })?;
 
-    list.iter()
+    Ok(list
+        .iter()
         .map(|v| {
             let s = |ptr: &[&str]| -> String {
                 let mut cur = v;
@@ -324,7 +332,7 @@ fn parse_audit_json(text: &str) -> Vec<AuditVuln> {
                 title: s(&["advisory", "title"]),
             }
         })
-        .collect()
+        .collect())
 }
 
 /// Load `rpi.toml` from the workspace root, falling back to defaults when the
@@ -484,7 +492,7 @@ mod tests {
                   "package": { "name": "badcrate", "version": "1.2.3" } }
             ]}
         }"#;
-        let vulns = parse_audit_json(json);
+        let vulns = parse_audit_json(json).unwrap();
         assert_eq!(vulns.len(), 1);
         assert_eq!(vulns[0].id, "RUSTSEC-2021-0001");
         assert_eq!(vulns[0].package, "badcrate");
@@ -493,9 +501,20 @@ mod tests {
     }
 
     #[test]
-    fn audit_json_tolerates_empty_and_garbage() {
-        assert!(parse_audit_json("not json").is_empty());
-        assert!(parse_audit_json("{}").is_empty());
+    fn audit_json_garbage_and_missing_list_are_reported() {
+        let e = parse_audit_json("not json").unwrap_err();
+        assert!(e.starts_with("warn: "), "{e}");
+        let e = parse_audit_json("{}").unwrap_err();
+        assert!(
+            e.starts_with("warn: ") && e.contains("vulnerabilities.list"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn audit_json_empty_list_is_clean_not_warned() {
+        let json = r#"{ "vulnerabilities": { "count": 0, "list": [] } }"#;
+        assert_eq!(parse_audit_json(json).unwrap().len(), 0);
     }
 
     /// Fresh scratch dir under the system temp dir (removed by the caller).
