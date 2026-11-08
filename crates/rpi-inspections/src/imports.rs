@@ -140,7 +140,12 @@ mod tests {
             ("use a as b;", &["a"], &["a"]),
             ("use a::b as c;", &["a"], &["a"]),
             ("use {a as b, c::Y};", &["a", "c"], &["a", "c"]),
+            ("use a;", &["a"], &["a"]),
+            ("use {a, b};", &["a", "b"], &["a", "b"]),
+            // `use a::*` is handled by the Path branch; only a root-position
+            // glob reaches the Glob branch, which adds nothing.
             ("use a::*;", &["a"], &["a"]),
+            ("use {*};", &[], &[]),
             ("use a::{b::*, c};", &["a"], &["a"]),
             ("pub use a::X;", &["a"], &["a"]),
             ("pub(crate) use a::X;", &["a"], &["a"]),
@@ -155,6 +160,7 @@ mod tests {
             ("use x::Y; fn f() { z::go(); }", &["x"], &["x", "z"]),
             // Keyword path heads are never roots, even in reference mode.
             ("fn f() { crate::a(); self::b(); super::c(); }", &[], &[]),
+            ("fn f() { Self::new(); }", &[], &[]),
         ];
         for (src, want_use, want_ref) in cases {
             let ast = syn::parse_file(src).unwrap_or_else(|e| panic!("parse {src:?}: {e}"));
@@ -167,13 +173,14 @@ mod tests {
         }
     }
 
-    /// 現状の挙動を固定: `extern crate foo;` is not handled by the collector,
-    /// so it yields no roots (semantically `foo` is an external crate; fixing
-    /// that is tracked separately).
+    /// 現状の挙動を固定: `extern crate foo;` は collector が扱わず、抽出結果は
+    /// 空になる(意味的には foo は外部 crate なので抽出漏れ)。修正は #92 で追跡。
     #[test]
     fn extern_crate_current_behavior() {
         let ast = syn::parse_file("extern crate foo;").unwrap();
-        assert!(file_use_roots(&ast).is_empty());
-        assert!(file_reference_roots(&ast).is_empty());
+        let u = file_use_roots(&ast);
+        let r = file_reference_roots(&ast);
+        assert!(u.is_empty(), "use roots: {u:?}");
+        assert!(r.is_empty(), "reference roots: {r:?}");
     }
 }
