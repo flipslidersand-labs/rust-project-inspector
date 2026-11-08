@@ -124,4 +124,63 @@ mod tests {
         let r = file_use_roots(&syn::parse_file("use crate::foo; use super::bar;").unwrap());
         assert!(r.is_empty(), "no external roots expected, got {r:?}");
     }
+
+    fn set(items: &[&str]) -> BTreeSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Expected sets come from Rust syntax semantics: the external crate root
+    /// each `use` refers to. Columns: (source, use roots, reference roots).
+    #[test]
+    fn use_tree_syntax_variants() {
+        let cases: &[(&str, &[&str], &[&str])] = &[
+            ("use ::serde::X;", &["serde"], &["serde"]),
+            ("use {a::X, b::Y};", &["a", "b"], &["a", "b"]),
+            ("use a::{b::{c, d}};", &["a"], &["a"]),
+            ("use a as b;", &["a"], &["a"]),
+            ("use a::b as c;", &["a"], &["a"]),
+            ("use {a as b, c::Y};", &["a", "c"], &["a", "c"]),
+            ("use a;", &["a"], &["a"]),
+            ("use {a, b};", &["a", "b"], &["a", "b"]),
+            // `use a::*` is handled by the Path branch; only a root-position
+            // glob reaches the Glob branch, which adds nothing.
+            ("use a::*;", &["a"], &["a"]),
+            ("use {*};", &[], &[]),
+            ("use a::{b::*, c};", &["a"], &["a"]),
+            ("pub use a::X;", &["a"], &["a"]),
+            ("pub(crate) use a::X;", &["a"], &["a"]),
+            ("use {crate::a, super::b, self::c};", &[], &[]),
+            ("use {crate::a, d::Y};", &["d"], &["d"]),
+            // Path heads are reference-only: they must not inflate use roots.
+            (
+                "fn f() { ::a::b(); c::d(); let _: e::T; }",
+                &[],
+                &["a", "c", "e"],
+            ),
+            ("use x::Y; fn f() { z::go(); }", &["x"], &["x", "z"]),
+            // Keyword path heads are never roots, even in reference mode.
+            ("fn f() { crate::a(); self::b(); super::c(); }", &[], &[]),
+            ("fn f() { Self::new(); }", &[], &[]),
+        ];
+        for (src, want_use, want_ref) in cases {
+            let ast = syn::parse_file(src).unwrap_or_else(|e| panic!("parse {src:?}: {e}"));
+            assert_eq!(file_use_roots(&ast), set(want_use), "use roots: {src}");
+            assert_eq!(
+                file_reference_roots(&ast),
+                set(want_ref),
+                "reference roots: {src}"
+            );
+        }
+    }
+
+    /// 現状の挙動を固定: `extern crate foo;` は collector が扱わず、抽出結果は
+    /// 空になる(意味的には foo は外部 crate なので抽出漏れ)。修正は #92 で追跡。
+    #[test]
+    fn extern_crate_current_behavior() {
+        let ast = syn::parse_file("extern crate foo;").unwrap();
+        let u = file_use_roots(&ast);
+        let r = file_reference_roots(&ast);
+        assert!(u.is_empty(), "use roots: {u:?}");
+        assert!(r.is_empty(), "reference roots: {r:?}");
+    }
 }
