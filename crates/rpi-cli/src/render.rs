@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::Result;
-use rpi_core::{Report, Severity};
+use rpi_core::{is_hostile_char, sanitize_for_terminal, Report, Severity};
 
 /// Severity weights for the per-crate risk score.
 const W_ERROR: u64 = 100;
@@ -16,7 +16,7 @@ const W_WARN: u64 = 10;
 const W_INFO: u64 = 1;
 
 pub fn json(report: &Report) -> Result<String> {
-    Ok(serde_json::to_string_pretty(report)?)
+    Ok(escape_json_hostile(serde_json::to_string_pretty(report)?))
 }
 
 /// SARIF 2.1.0 for GitHub Code Scanning.
@@ -80,7 +80,7 @@ pub fn sarif(report: &Report) -> Result<String> {
             "results": results,
         }],
     });
-    Ok(serde_json::to_string_pretty(&doc)?)
+    Ok(escape_json_hostile(serde_json::to_string_pretty(&doc)?))
 }
 
 /// Compare the current report against a previously-saved JSON report and
@@ -271,16 +271,18 @@ fn render_findings(out: &mut String, report: &Report) {
     }
 }
 
-/// Makes externally sourced strings (file names, crate names, messages) safe to
-/// print to a terminal. C0 controls (including `\n` and `\t`: line layout is
-/// produced by the renderer itself, so any newline inside a value is hostile),
-/// DEL and C1 controls become `\u{..}`. Printable text (CJK, emoji, spaces) is unchanged.
-pub(crate) fn sanitize_for_terminal(s: &str) -> String {
+/// serde_json escapes only C0 controls. Rewrite DEL, C1 controls and bidi/zero-width
+/// characters as `\uXXXX`. Outside string literals the output is ASCII, so this
+/// only touches string contents and keeps the document valid and equivalent.
+fn escape_json_hostile(json: String) -> String {
     use std::fmt::Write;
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if c.is_control() {
-            let _ = write!(out, "\\u{{{:x}}}", c as u32);
+    if !json.chars().any(|c| c >= '\u{7f}' && is_hostile_char(c)) {
+        return json;
+    }
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        if c >= '\u{7f}' && is_hostile_char(c) {
+            let _ = write!(out, "\\u{:04x}", c as u32);
         } else {
             out.push(c);
         }
@@ -349,6 +351,23 @@ mod tests {
         assert!(out.contains("\\u{1b}"));
         // Only the renderer's own line breaks remain.
         assert!(!out.contains("bad \u{1b}") && !out.contains("\nfake line"));
+    }
+
+    #[test]
+    fn json_and_sarif_escape_c1_and_bidi() {
+        let mut f = finding("x", Severity::Warn, "k\u{85}a\u{202e}b\u{7f}");
+        f.message = "m\u{85}a\u{202e}b\u{7f}".into();
+        let r = report(vec![f]);
+        for out in [json(&r).unwrap(), sarif(&r).unwrap()] {
+            assert!(
+                !out.contains('\u{85}') && !out.contains('\u{202e}') && !out.contains('\u{7f}')
+            );
+            assert!(out.contains("\\u0085") && out.contains("\\u202e"), "{out}");
+            let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert!(v.is_object());
+        }
+        let v: serde_json::Value = serde_json::from_str(&json(&r).unwrap()).unwrap();
+        assert!(v.to_string().contains('\u{85}'), "value must round-trip");
     }
 
     #[test]

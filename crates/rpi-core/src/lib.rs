@@ -211,6 +211,41 @@ pub trait Inspection {
     fn run(&self, ctx: &Context) -> Vec<Finding>;
 }
 
+/// True for characters that must not reach a terminal or log verbatim: C0/C1
+/// controls and DEL (`char::is_control`), bidirectional controls that can
+/// visually reorder text (U+061C, U+200E/F, U+202A-E, U+2066-9) and zero-width
+/// characters (U+200B-D, U+2060, U+FEFF).
+pub fn is_hostile_char(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{61c}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2060}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{feff}'
+        )
+}
+
+/// Makes externally sourced strings (file names, crate names, messages) safe to
+/// print to a terminal. Characters for which [`is_hostile_char`] holds become
+/// `\u{..}` (this includes `\n` and `\t`: line layout is produced by the
+/// renderer itself, so any newline inside a value is hostile). Printable text
+/// (CJK, emoji, spaces) is unchanged.
+pub fn sanitize_for_terminal(s: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if is_hostile_char(c) {
+            let _ = write!(out, "\\u{{{:x}}}", c as u32);
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     /// #35: `KNOWN_KEYS` must match the real `Config` fields.
@@ -245,5 +280,20 @@ mod tests {
         };
         let json = serde_json::to_string(&loc).unwrap();
         assert_eq!(json, r#"{"krate":"core"}"#);
+    }
+
+    #[test]
+    fn sanitize_escapes_c1_and_bidi_but_keeps_text() {
+        assert_eq!(sanitize_for_terminal("a\u{85}b\u{9b}"), "a\\u{85}b\\u{9b}");
+        assert_eq!(
+            sanitize_for_terminal("x\u{202e}y\u{2066}"),
+            "x\\u{202e}y\\u{2066}"
+        );
+        assert_eq!(
+            sanitize_for_terminal("\u{200b}\u{feff}"),
+            "\\u{200b}\\u{feff}"
+        );
+        let ok = "日本語 パス/with space/😀.rs ー";
+        assert_eq!(sanitize_for_terminal(ok), ok);
     }
 }
