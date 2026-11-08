@@ -50,6 +50,7 @@ rpi inspect . --fail-on warn         # exit 1 on warn+ (CI gate) / warn 以上�
 rpi inspect . --fail-on error        # exit 1 on error only / error があるときだけ exit 1
 rpi inspect . --audit                # run cargo-audit, enable audit-bridge / cargo-audit を実行し audit-bridge を有効化
 rpi inspect . --baseline prior.json  # compare with a saved JSON report, print trend to stderr / 保存済み JSON と比較し trend を stderr に出力
+rpi inspect . --verbose              # per-inspection timing on stderr / 各 inspection の所要時間を stderr に出力
 ```
 
 `--audit` requires [`cargo-audit`](https://crates.io/crates/cargo-audit): `cargo install cargo-audit`. Without it, `audit-bridge` reports nothing (no error is raised).  

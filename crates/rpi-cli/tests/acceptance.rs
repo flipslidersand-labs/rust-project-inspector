@@ -435,3 +435,38 @@ fn dev_dependency_cycle_is_not_reported_as_cycle() {
         "no cycle Error expected: {findings:?}"
     );
 }
+
+fn run_inspect(extra: &[&str]) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_rpi"))
+        .arg("inspect")
+        .arg(fixture())
+        .args(extra)
+        .output()
+        .expect("rpi binary must be runnable")
+}
+
+#[test]
+fn verbose_prints_per_inspection_timing_to_stderr() {
+    let out = run_inspect(&["--verbose"]);
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for i in rpi_inspections::all() {
+        let line = stderr
+            .lines()
+            .find(|l| l.starts_with("[rpi] ") && l.contains(i.name()))
+            .unwrap_or_else(|| panic!("no timing line for {}: {stderr}", i.name()));
+        assert!(line.ends_with("ms"), "timing line must end in ms: {line}");
+    }
+}
+
+#[test]
+fn without_verbose_no_timing_and_stdout_unchanged() {
+    let plain = run_inspect(&[]);
+    let verbose = run_inspect(&["--verbose"]);
+    assert!(!String::from_utf8_lossy(&plain.stderr).contains("[rpi]"));
+    assert_eq!(plain.stdout, verbose.stdout, "stdout must not change");
+    let json_verbose = run_inspect(&["--format", "json", "--verbose"]);
+    assert!(!String::from_utf8_lossy(&json_verbose.stdout).contains("[rpi]"));
+    serde_json::from_slice::<serde_json::Value>(&json_verbose.stdout)
+        .expect("stdout must stay valid JSON with --verbose");
+}
