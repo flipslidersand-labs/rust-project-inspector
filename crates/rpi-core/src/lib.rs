@@ -151,6 +151,20 @@ pub struct Config {
     pub churn_git_timeout_secs: u64,
 }
 
+impl Config {
+    /// Every key accepted in `rpi.toml`; used to flag unknown keys (#35).
+    /// Keep in sync with the fields above.
+    pub const KNOWN_KEYS: &'static [&'static str] = &[
+        "module_size_loc",
+        "pub_surface_warn",
+        "unsafe_density_warn",
+        "coupling_warn",
+        "complexity_warn",
+        "churn_warn",
+        "churn_git_timeout_secs",
+    ];
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {

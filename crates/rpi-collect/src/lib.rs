@@ -406,19 +406,42 @@ fn parse_audit_json(text: &str) -> Result<Vec<AuditVuln>, String> {
 
 /// Load `rpi.toml` from the workspace root, falling back to defaults when the
 /// file is absent or unreadable. A malformed file warns and uses defaults
-/// rather than aborting the run.
+/// rather than aborting the run. Unknown keys (typos) warn on stderr but the
+/// known keys are still applied (#35).
 fn load_config(root: &Path) -> Config {
     let path = root.join("rpi.toml");
     let Ok(text) = fs::read_to_string(&path) else {
         return Config::default();
     };
-    match toml::from_str(&text) {
-        Ok(cfg) => cfg,
+    match parse_config(&text) {
+        Ok((cfg, unknown)) => {
+            for key in unknown {
+                // `{:?}`: the target repo is untrusted; escape control chars.
+                eprintln!(
+                    "warn: unknown key {key:?} in {} (ignored; check for typos)",
+                    path.display()
+                );
+            }
+            cfg
+        }
         Err(e) => {
             eprintln!("warn: ignoring {} (parse error: {e})", path.display());
             Config::default()
         }
     }
+}
+
+/// Parse `rpi.toml` text into a [`Config`] plus the top-level keys that are
+/// not recognised config fields.
+fn parse_config(text: &str) -> Result<(Config, Vec<String>), toml::de::Error> {
+    let table: toml::Table = text.parse()?;
+    let unknown = table
+        .keys()
+        .filter(|k| !Config::KNOWN_KEYS.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    let cfg = toml::from_str(text)?;
+    Ok((cfg, unknown))
 }
 
 /// Recursively gather `.rs` files under `dir`, skipping the crate root's own
@@ -1139,5 +1162,27 @@ mod tests {
         let result = collect(&root.join("src"), CollectOptions::default());
         let _ = fs::remove_dir_all(&root);
         assert!(result.is_ok(), "collect failed: {:?}", result.err());
+    }
+
+    /// #35: a typo'd key is reported, valid keys are not, and known values
+    /// are still applied.
+    #[test]
+    fn parse_config_reports_unknown_keys_and_keeps_known_values() {
+        let (cfg, unknown) = parse_config("modul_size_loc = 200\ncoupling_warn = 7\n").unwrap();
+        assert_eq!(unknown, vec!["modul_size_loc".to_string()]);
+        assert_eq!(cfg.coupling_warn, 7);
+        assert_eq!(cfg.module_size_loc, Config::default().module_size_loc);
+    }
+
+    #[test]
+    fn parse_config_known_keys_produce_no_warning() {
+        let text: String = Config::KNOWN_KEYS
+            .iter()
+            .map(|k| format!("{k} = 1\n"))
+            .collect();
+        let (cfg, unknown) = parse_config(&text).unwrap();
+        assert!(unknown.is_empty(), "{unknown:?}");
+        assert_eq!(cfg.module_size_loc, 1);
+        assert_eq!(cfg.churn_git_timeout_secs, 1);
     }
 }
