@@ -108,8 +108,9 @@ pub fn trend(current: &Report, baseline: &serde_json::Value) -> Result<String, S
                 "\n  severity: error {be}→{ce}, warn {bw}→{cw}, info {bi}→{ci}"
             ));
             // Same total but a worse mix (more errors, or more warns at equal
-            // errors) is still a regression (#56).
-            if delta == 0 && (ce, cw) > (be, bw) {
+            // errors) is still a regression (#56). A shrinking total with more
+            // errors is a regression too (#99).
+            if (delta == 0 && (ce, cw) > (be, bw)) || (delta < 0 && ce > be) {
                 arrow = "▲";
                 verdict = "regression (severity worsened)";
                 line = format!(
@@ -346,6 +347,18 @@ mod tests {
         let t = trend(&cur, &base).unwrap();
         assert!(t.contains("regression (severity worsened)"), "{t}");
         assert!(t.contains("error 0→1, warn 1→0"), "{t}");
+    }
+
+    #[test]
+    fn trend_flags_more_errors_even_when_total_decreases() {
+        let cur = report(vec![finding("a", Severity::Error, "k")]);
+        let base: serde_json::Value = serde_json::json!({
+            "metrics":{"finding_count":3},
+            "findings":[{"severity":"warn"},{"severity":"warn"},{"severity":"info"}]
+        });
+        let t = trend(&cur, &base).unwrap();
+        assert!(t.contains("regression (severity worsened)"), "{t}");
+        assert!(!t.contains("improvement"), "{t}");
     }
 
     #[test]
