@@ -1,0 +1,9 @@
+# Root-package + member fixture: the root [package] sits above member/.
+# Used to verify files are attributed to exactly one crate (#75).
+[package]
+name = "root_pkg"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = ["member"]
