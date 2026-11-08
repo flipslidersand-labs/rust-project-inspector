@@ -84,8 +84,13 @@ impl<'ast> Visit<'ast> for RootCollector {
 
     fn visit_path(&mut self, p: &'ast syn::Path) {
         if self.include_all_paths {
-            if let Some(first) = p.segments.first() {
-                self.add(first.ident.to_string());
+            // A one-segment path (`bytes`, `f`) is a local binding, fn or
+            // type, never `crate::item`; its import is already caught by
+            // `use`. Only `a::b` / `::a` can name an external crate. (#98)
+            if p.segments.len() > 1 || p.leading_colon.is_some() {
+                if let Some(first) = p.segments.first() {
+                    self.add(first.ident.to_string());
+                }
             }
         }
         visit::visit_path(self, p);
@@ -229,5 +234,25 @@ mod tests {
         let ast = syn::parse_file("#[tokio::main] async fn main() {}").unwrap();
         assert!(file_use_roots(&ast).contains("tokio"));
         assert!(file_reference_roots(&ast).contains("tokio"));
+    }
+
+    #[test]
+    fn single_segment_paths_are_not_reference_roots() {
+        let src = "fn f(bytes: u8) -> u8 { let serde = bytes; serde }";
+        let r = file_reference_roots(&syn::parse_file(src).unwrap());
+        assert!(r.is_empty(), "local names leaked as roots: {r:?}");
+    }
+
+    #[test]
+    fn multi_segment_and_leading_colon_paths_are_reference_roots() {
+        let src = "fn f() { bytes::Bytes::new(); ::serde::de(); }";
+        let r = file_reference_roots(&syn::parse_file(src).unwrap());
+        assert!(r.contains("bytes") && r.contains("serde"), "{r:?}");
+    }
+
+    #[test]
+    fn use_import_still_counts_without_other_paths() {
+        let r = file_reference_roots(&syn::parse_file("use bytes::Bytes;").unwrap());
+        assert!(r.contains("bytes"));
     }
 }
