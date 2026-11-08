@@ -481,6 +481,33 @@ fn parse_file(path: &Path) -> Option<SourceFile> {
 /// the lexical backstop below before it gets here.
 const PARSER_STACK_BYTES: usize = 1024 * 1024 * 1024;
 
+/// Sizes tried in order when the thread cannot be created (e.g. `ulimit -v`
+/// makes the 1 GiB reservation fail with EAGAIN). Smaller stacks leave less
+/// headroom for bracket-free deep shapes (the known residual class); the
+/// group limit (512 levels, ~2 KiB/level) and AST limit (128) fit even in
+/// 16 MiB.
+const PARSER_STACK_FALLBACKS: [usize; 4] = [
+    PARSER_STACK_BYTES,
+    256 * 1024 * 1024,
+    64 * 1024 * 1024,
+    16 * 1024 * 1024,
+];
+
+/// Run `spawn(size)` for each size until one succeeds; the last error if none.
+fn spawn_with_fallback<T>(
+    sizes: &[usize],
+    mut spawn: impl FnMut(usize) -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let mut last = None;
+    for &size in sizes {
+        match spawn(size) {
+            Ok(v) => return Ok(v),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("no stack sizes to try")))
+}
+
 /// Backstop for bracket nesting (macro token groups are not bounded by
 /// `syn`). Measured with a lexer-aware scan, so brackets inside strings,
 /// comments, chars and raw strings are ignored.
@@ -628,33 +655,40 @@ enum ParseFail {
 ///
 /// A stack overflow cannot be caught; it aborts the process. The lexical
 /// backstop plus the large stack are what keep inputs away from that.
-fn check_on_big_stack(content: String) -> Result<Result<(), ParseFail>, String> {
-    let handle = thread::Builder::new()
-        .name("rpi-parse".into())
-        .stack_size(PARSER_STACK_BYTES)
-        .spawn(move || match syn::parse_file(&content) {
-            Err(e) => {
-                let start = e.span().start();
-                Err(ParseFail::Syntax {
-                    line: start.line,
-                    col: start.column + 1,
-                    msg: e.to_string(),
-                })
-            }
-            Ok(ast) => {
-                let mut v = AstDepth::default();
-                syn::visit::Visit::visit_file(&mut v, &ast);
-                if v.max > MAX_AST_DEPTH {
-                    Err(ParseFail::TooDeep)
-                } else {
-                    Ok(())
-                }
-            }
-        })
-        .map_err(|e| format!("could not start parser thread: {e}"))?;
+fn check_on_big_stack(content: &str) -> Result<Result<(), ParseFail>, String> {
+    let handle = spawn_with_fallback(&PARSER_STACK_FALLBACKS, |size| {
+        let content = content.to_owned();
+        thread::Builder::new()
+            .name("rpi-parse".into())
+            .stack_size(size)
+            .spawn(move || parse_and_measure(&content))
+    })
+    .map_err(|e| format!("could not start parser thread: {e}"))?;
     handle
         .join()
         .map_err(|_| "parser thread panicked".to_string())
+}
+
+fn parse_and_measure(content: &str) -> Result<(), ParseFail> {
+    match syn::parse_file(content) {
+        Err(e) => {
+            let start = e.span().start();
+            Err(ParseFail::Syntax {
+                line: start.line,
+                col: start.column + 1,
+                msg: e.to_string(),
+            })
+        }
+        Ok(ast) => {
+            let mut v = AstDepth::default();
+            syn::visit::Visit::visit_file(&mut v, &ast);
+            if v.max > MAX_AST_DEPTH {
+                Err(ParseFail::TooDeep)
+            } else {
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Like [`parse_file`] but returns the warning text instead of printing it.
@@ -669,7 +703,7 @@ fn try_parse_file(path: &Path) -> Result<SourceFile, String> {
         return Err(too_deep());
     }
     let loc = content.lines().count();
-    match check_on_big_stack(content.clone())
+    match check_on_big_stack(&content)
         .map_err(|e| format!("warn: skipping {} ({e})", path.display()))?
     {
         Ok(()) => {}
@@ -999,6 +1033,25 @@ mod tests {
         let r = try_parse_file(&path);
         std::fs::remove_dir_all(&dir).ok();
         assert!(r.is_ok(), "{:?}", r.err());
+    }
+
+    #[test]
+    fn spawn_falls_back_to_smaller_stack() {
+        let mut tried = Vec::new();
+        let r = spawn_with_fallback(&[3, 2, 1], |size| {
+            tried.push(size);
+            if size > 2 {
+                Err(std::io::Error::other("EAGAIN"))
+            } else {
+                Ok(size)
+            }
+        });
+        assert_eq!(r.unwrap(), 2);
+        assert_eq!(tried, vec![3, 2]);
+        assert!(spawn_with_fallback(&[1], |_| -> std::io::Result<()> {
+            Err(std::io::Error::other("x"))
+        })
+        .is_err());
     }
 
     #[test]
