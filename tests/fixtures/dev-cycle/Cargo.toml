@@ -1,0 +1,5 @@
+# dev-dependency 経由の「循環」は Cargo 上正当。循環依存として誤検出しないことの fixture (#62)。
+# 独自の [workspace] で外側の rpi workspace から隔離する。
+[workspace]
+resolver = "2"
+members = ["crates/dc_a", "crates/dc_b"]
