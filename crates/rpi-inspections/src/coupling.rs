@@ -60,6 +60,7 @@ mod tests {
             root_dir: PathBuf::from("/w/k"),
             workspace_deps: Vec::new(),
             external_deps: Vec::new(),
+            external_dep_packages: Default::default(),
             files: vec![SourceFile {
                 path: PathBuf::from("/w/k/src/lib.rs"),
                 loc: src.lines().count(),
@@ -98,6 +99,23 @@ mod tests {
         let f = Coupling.run(&ctx_one_file(src, 0));
         assert_eq!(f.len(), 1);
         assert!(f[0].message.contains("1 distinct"));
+    }
+
+    #[test]
+    fn count_equal_to_threshold_is_silent() {
+        // 2 distinct roots (a, b), warn = 2: `count > warn` => 2 > 2 is false.
+        let src = "use a::x; use b::y;";
+        let f = Coupling.run(&ctx_one_file(src, 2));
+        assert!(f.is_empty(), "count == warn must not fire");
+    }
+
+    #[test]
+    fn count_one_over_threshold_fires() {
+        // 3 distinct roots (a, b, c), warn = 2: 3 > 2 is true => exactly 1 finding.
+        let src = "use a::x; use b::y; use c::z;";
+        let f = Coupling.run(&ctx_one_file(src, 2));
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].metric, Some(3.0));
     }
 
     #[test]

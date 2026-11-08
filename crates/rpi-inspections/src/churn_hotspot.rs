@@ -73,6 +73,7 @@ mod tests {
             root_dir: PathBuf::from("/w/k"),
             workspace_deps: Vec::new(),
             external_deps: Vec::new(),
+            external_dep_packages: Default::default(),
             files: vec![SourceFile {
                 path: path.clone(),
                 loc: 1,
@@ -111,6 +112,57 @@ mod tests {
     #[test]
     fn low_complexity_is_ignored() {
         assert!(ChurnHotspot.run(&ctx("fn f() {}", 9)).is_empty());
+    }
+
+    // complexity 2 (one if) == complexity_warn (2)
+    const AT_CX_WARN: &str = "fn f(a:bool){ if a{} }";
+
+    #[test]
+    fn churn_equal_to_threshold_fires() {
+        // changes 3 == churn_warn 3: `changes < churn_warn` is false => not skipped;
+        // cx 4 > 2 => fires. metric = 3 * 4.
+        let f = ChurnHotspot.run(&ctx(COMPLEX, 3));
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].metric, Some((3 * 4) as f64));
+    }
+
+    #[test]
+    fn churn_one_below_threshold_is_silent() {
+        // changes 2 < churn_warn 3 => skipped.
+        assert!(ChurnHotspot.run(&ctx(COMPLEX, 2)).is_empty());
+    }
+
+    #[test]
+    fn complexity_equal_to_threshold_is_silent() {
+        // cx 2 == complexity_warn 2: `cx > cx_warn` is false, even with high churn.
+        assert!(ChurnHotspot.run(&ctx(AT_CX_WARN, 9)).is_empty());
+    }
+
+    #[test]
+    fn complexity_one_over_threshold_fires() {
+        // cx 3 (two ifs) > complexity_warn 2, changes 9 well above churn_warn => fires.
+        let f = ChurnHotspot.run(&ctx("fn f(a:bool){ if a{} if a{} }", 9));
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].metric, Some((9 * 3) as f64));
+    }
+
+    #[test]
+    fn only_files_present_in_churn_are_flagged() {
+        // Two equally complex files; only lib.rs is in the churn map (changes 5).
+        // other.rs falls back to unwrap_or(0) < churn_warn 3 => skipped.
+        let mut c = ctx(COMPLEX, 5);
+        let other = PathBuf::from("/w/k/src/other.rs");
+        c.crates[0].files.push(SourceFile {
+            path: other,
+            loc: 1,
+            ast: syn::parse_file(COMPLEX).unwrap(),
+        });
+        let f = ChurnHotspot.run(&c);
+        assert_eq!(f.len(), 1);
+        assert_eq!(
+            f[0].location.file.as_deref(),
+            Some(std::path::Path::new("/w/k/src/lib.rs"))
+        );
     }
 
     #[test]

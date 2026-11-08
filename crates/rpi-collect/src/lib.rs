@@ -61,6 +61,7 @@ fn collect_inner(root: &Path, opts: CollectOptions) -> Result<Context> {
 
         let mut workspace_deps = Vec::new();
         let mut external_deps = Vec::new();
+        let mut external_dep_packages = HashMap::new();
         for dep in &pkg.dependencies {
             // Only normal dependencies form the build graph. A dev/build edge
             // between members (a --dev--> b --normal--> a) is legal in Cargo and
@@ -71,7 +72,13 @@ fn collect_inner(root: &Path, opts: CollectOptions) -> Result<Context> {
             if member_names.contains(&dep.name) {
                 workspace_deps.push(dep.name.clone());
             } else {
-                external_deps.push(dep.name.clone());
+                // Code refers to a renamed dependency by its rename; keep the
+                // original package name separately for display (#66).
+                let reference = dep.rename.as_deref().unwrap_or(&dep.name);
+                external_deps.push(reference.to_string());
+                if reference != dep.name {
+                    external_dep_packages.insert(reference.to_string(), dep.name.clone());
+                }
             }
         }
 
@@ -86,6 +93,7 @@ fn collect_inner(root: &Path, opts: CollectOptions) -> Result<Context> {
             root_dir,
             workspace_deps,
             external_deps,
+            external_dep_packages,
             files,
         });
     }
@@ -352,7 +360,10 @@ fn load_config(root: &Path) -> Config {
     }
 }
 
-/// Recursively gather `.rs` files under `dir`, skipping any `target/` output.
+/// Recursively gather `.rs` files under `dir`, skipping any `target/` output
+/// and any subdirectory that holds its own `Cargo.toml` (another crate or a
+/// nested workspace, which is collected separately or not at all; #75).
+/// `dir` itself is the crate root and is always walked.
 fn collect_rs_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     walk(dir, &mut out);
@@ -374,6 +385,9 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         }
         if ft.is_dir() {
             if path.file_name().is_some_and(|n| n == "target") {
+                continue;
+            }
+            if path.join("Cargo.toml").is_file() {
                 continue;
             }
             walk(&path, out);
@@ -471,6 +485,85 @@ mod tests {
         let files = collect_rs_files(&root);
         let _ = fs::remove_dir_all(&root);
         assert_eq!(files, vec![src.join("a.rs")]);
+    }
+
+    fn root_and_member() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/root-and-member")
+            .canonicalize()
+            .unwrap()
+    }
+
+    #[test]
+    fn root_package_does_not_absorb_member_or_nested_crates() {
+        let ctx = collect(&root_and_member(), CollectOptions::default()).unwrap();
+        let mut seen: Vec<(String, PathBuf)> = Vec::new();
+        for c in &ctx.crates {
+            for f in &c.files {
+                seen.push((c.name.clone(), f.path.clone()));
+            }
+        }
+        let mut paths: Vec<_> = seen.iter().map(|(_, p)| p.clone()).collect();
+        paths.sort();
+        paths.dedup();
+        assert_eq!(
+            paths.len(),
+            seen.len(),
+            "a file belongs to two crates: {seen:?}"
+        );
+
+        let owner = |suffix: &str| -> Vec<&str> {
+            seen.iter()
+                .filter(|(_, p)| p.ends_with(suffix))
+                .map(|(n, _)| n.as_str())
+                .collect()
+        };
+        assert_eq!(owner("member/src/lib.rs"), vec!["member"]);
+        assert_eq!(owner("root-and-member/src/lib.rs"), vec!["root_pkg"]);
+        assert!(
+            seen.iter()
+                .all(|(_, p)| !p.ends_with("tests/fixtures/nested/src/lib.rs")),
+            "nested workspace under tests/fixtures must not be collected: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn walk_skips_target_and_nested_crates_but_not_git_or_node_modules() {
+        let root = std::env::temp_dir().join(format!("rpi_issue75_walk_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for d in [
+            "src",
+            "target/debug",
+            "node_modules/x",
+            ".git/hooks",
+            "sub/src",
+        ] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        for f in [
+            "src/a.rs",
+            "target/debug/gen.rs",
+            "node_modules/x/n.rs",
+            ".git/hooks/h.rs",
+            "sub/src/b.rs",
+        ] {
+            fs::write(root.join(f), "fn f() {}\n").unwrap();
+        }
+        fs::write(root.join("Cargo.toml"), "").unwrap();
+        fs::write(root.join("sub/Cargo.toml"), "").unwrap();
+
+        let files = collect_rs_files(&root);
+        let _ = fs::remove_dir_all(&root);
+        // Documented policy: only `target/` and directories holding their own
+        // Cargo.toml are pruned; .git / node_modules are walked like any dir.
+        assert_eq!(
+            files,
+            vec![
+                root.join(".git/hooks/h.rs"),
+                root.join("node_modules/x/n.rs"),
+                root.join("src/a.rs"),
+            ]
+        );
     }
 
     #[test]
@@ -587,6 +680,73 @@ mod tests {
             names,
             vec!["lib.rs", "other.rs"],
             "good files must all be collected"
+        );
+    }
+
+    #[test]
+    fn renamed_dependency_is_keyed_by_reference_name() {
+        // `foo = { package = "bar" }` is referenced as `foo` in code (#66).
+        let dir = scratch("renamed_dep");
+        std::fs::create_dir_all(dir.join("bar/src")).unwrap();
+        std::fs::create_dir_all(dir.join("app/src")).unwrap();
+        std::fs::write(
+            dir.join("bar/Cargo.toml"),
+            "[package]\nname = \"bar\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("bar/src/lib.rs"), "pub fn b() {}\n").unwrap();
+        std::fs::write(
+            dir.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
+             [dependencies]\nfoo = { package = \"bar\", path = \"../bar\" }\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("app/src/lib.rs"), "pub use foo::b;\n").unwrap();
+
+        let ctx = collect(&dir.join("app"), CollectOptions::default());
+        std::fs::remove_dir_all(&dir).ok();
+        let ctx = ctx.expect("collection must succeed");
+
+        let krate = &ctx.crates[0];
+        assert_eq!(krate.external_deps, vec!["foo".to_string()]);
+        assert_eq!(
+            krate.external_dep_packages.get("foo").map(String::as_str),
+            Some("bar")
+        );
+    }
+
+    #[test]
+    fn hyphenated_rename_keeps_toml_key_as_reference_name() {
+        let dir = scratch("renamed_dep_hyphen");
+        std::fs::create_dir_all(dir.join("bar/src")).unwrap();
+        std::fs::create_dir_all(dir.join("app/src")).unwrap();
+        std::fs::write(
+            dir.join("bar/Cargo.toml"),
+            "[package]\nname = \"bar\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("bar/src/lib.rs"), "pub fn b() {}\n").unwrap();
+        std::fs::write(
+            dir.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
+             [dependencies]\nmy-foo = { package = \"bar\", path = \"../bar\" }\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("app/src/lib.rs"), "pub use my_foo::b;\n").unwrap();
+
+        let ctx = collect(&dir.join("app"), CollectOptions::default());
+        std::fs::remove_dir_all(&dir).ok();
+        let ctx = ctx.expect("collection must succeed");
+
+        // Stored as written in TOML; dep-hygiene normalizes `-` to `_` itself.
+        let krate = &ctx.crates[0];
+        assert_eq!(krate.external_deps, vec!["my-foo".to_string()]);
+        assert_eq!(
+            krate
+                .external_dep_packages
+                .get("my-foo")
+                .map(String::as_str),
+            Some("bar")
         );
     }
 
