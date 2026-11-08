@@ -92,10 +92,18 @@ impl<'ast> Visit<'ast> for RootCollector {
     }
 
     fn visit_attribute(&mut self, a: &'ast syn::Attribute) {
-        if let Some(first) = a.path().segments.first() {
-            self.add(first.ident.to_string());
+        // Only multi-segment paths (`tokio::main`) name a crate. A bare
+        // `derive`/`doc`/`cfg`/`test` is built in, and a bare imported
+        // attribute macro is already covered by its `use`.
+        let segs = &a.path().segments;
+        if segs.len() > 1 {
+            self.add(segs[0].ident.to_string());
         }
-        visit::visit_attribute(self, a);
+        // Don't recurse into the attribute path itself: `visit_path` would
+        // re-add a bare `derive`/`doc`. Only a `#[x = expr]` value can hold paths.
+        if let syn::Meta::NameValue(nv) = &a.meta {
+            self.visit_expr(&nv.value);
+        }
     }
 }
 
@@ -198,5 +206,28 @@ mod tests {
                 "reference roots: {src}"
             );
         }
+    }
+
+    #[test]
+    fn builtin_attributes_are_not_roots() {
+        for src in [
+            "#[derive(Debug)] struct S;",
+            "/// doc\nstruct S;",
+            "#[cfg(a)] fn f() {}",
+        ] {
+            let ast = syn::parse_file(src).unwrap();
+            assert!(file_use_roots(&ast).is_empty(), "use roots for {src:?}");
+            assert!(
+                file_reference_roots(&ast).is_empty(),
+                "ref roots for {src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn external_attribute_macro_is_root() {
+        let ast = syn::parse_file("#[tokio::main] async fn main() {}").unwrap();
+        assert!(file_use_roots(&ast).contains("tokio"));
+        assert!(file_reference_roots(&ast).contains("tokio"));
     }
 }
