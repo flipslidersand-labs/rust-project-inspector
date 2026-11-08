@@ -78,6 +78,24 @@ impl<'ast> Visit<'ast> for Counter {
         visit::visit_item_trait(self, t);
     }
 
+    fn visit_item_foreign_mod(&mut self, m: &'ast syn::ItemForeignMod) {
+        // Policy: in `unsafe extern`, each fn/static without `safe` counts as 1;
+        // the block itself, `safe` items and plain `extern` blocks count 0.
+        if m.unsafety.is_some() {
+            for item in &m.items {
+                let safety = match item {
+                    syn::ForeignItem::Fn(f) => &f.sig.safety,
+                    syn::ForeignItem::Static(s) => &s.safety,
+                    _ => continue,
+                };
+                if !matches!(safety, syn::Safety::Safe(_)) {
+                    self.stats.unsafe_count += 1;
+                }
+            }
+        }
+        visit::visit_item_foreign_mod(self, m);
+    }
+
     fn visit_attribute(&mut self, a: &'ast syn::Attribute) {
         // Catches `#[test]`, `#[tokio::test]`, `#[rstest]`-style last segments.
         if a.path().segments.last().is_some_and(|s| s.ident == "test") {
@@ -327,6 +345,37 @@ mod tests {
         // unsafe fn + unsafe trait + unsafe impl + unsafe block = 4
         assert_eq!(findings[0].metric.map(|_| ()), Some(()));
         assert!(findings[0].message.starts_with("4 unsafe items"));
+    }
+
+    #[test]
+    fn counts_unsafe_extern_declarations_not_safe_ones() {
+        let src = r#"
+            unsafe extern "C" {
+                pub unsafe fn u();
+                fn d();
+                pub safe fn s();
+                static X: u8;
+                safe static Y: u8;
+            }
+        "#;
+        let c = ctx_with(Config::default(), vec![krate_from_src("k", &[src])]);
+        let findings = UnsafeSurface.run(&c);
+        assert_eq!(findings.len(), 1);
+        // unsafe fn + unqualified fn + unqualified static = 3; `safe` ones and
+        // the block itself are not counted.
+        assert!(findings[0].message.starts_with("3 unsafe items"));
+    }
+
+    #[test]
+    fn plain_extern_block_is_not_counted() {
+        let src = r#"
+            extern "C" {
+                pub fn f();
+                static X: u8;
+            }
+        "#;
+        let c = ctx_with(Config::default(), vec![krate_from_src("k", &[src])]);
+        assert!(UnsafeSurface.run(&c).is_empty());
     }
 
     #[test]
