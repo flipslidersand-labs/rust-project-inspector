@@ -441,20 +441,21 @@ mod tests {
         assert_eq!(runs[0]["tool"]["driver"]["name"], "rust-project-inspector");
     }
 
+    // uri の '/' 区切り正規化は #90 で扱う。Linux では検証できない。
     #[test]
-    fn sarif_uri_uses_forward_slashes() {
+    fn sarif_nested_file_uri_is_relative() {
         let v = sarif_one(Some("/repo/crates/k/src/deep/mod.rs"), Some((3, 4)));
         let uri = v["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
             ["artifactLocation"]["uri"]
             .as_str()
             .unwrap();
         assert_eq!(uri, "crates/k/src/deep/mod.rs");
-        assert!(!uri.contains('\\'), "uri must be '/'-separated: {uri}");
     }
 
     /// Pins CURRENT behavior only (#71 (1)): a file outside the workspace root
     /// is emitted as the unchanged absolute path. Whether that is the intended
     /// spec is a human decision; change this test if the spec changes.
+    /// Windows で `D:\other\x.rs` が来ると有効な URI にならない可能性。現状の Linux 前提の挙動を固定。
     #[test]
     fn sarif_uri_outside_root_is_absolute_current_behavior() {
         let v = sarif_one(Some("/elsewhere/x.rs"), None);
