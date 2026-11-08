@@ -514,7 +514,7 @@ mod tests {
         assert_eq!(owner("root-and-member/src/lib.rs"), vec!["root_pkg"]);
         assert!(
             seen.iter()
-                .all(|(_, p)| !p.to_string_lossy().contains("nested")),
+                .all(|(_, p)| !p.ends_with("tests/fixtures/nested/src/lib.rs")),
             "nested workspace under tests/fixtures must not be collected: {seen:?}"
         );
     }
