@@ -45,10 +45,16 @@ fn collect_inner(root: &Path, opts: CollectOptions) -> Result<Context> {
     // `rust-toolchain.toml` are not picked up and executed (#100). Trust
     // boundary: cargo still reads the target's manifest and build scripts are
     // never run by `cargo metadata`.
-    let manifest = root
+    // Like cargo, use the nearest enclosing Cargo.toml so a subdirectory
+    // (`src/`) works; the cwd stays neutral, so this search is safe.
+    let resolved = root
         .canonicalize()
-        .with_context(|| format!("cannot resolve {}", root.display()))?
-        .join("Cargo.toml");
+        .with_context(|| format!("cannot resolve {}", root.display()))?;
+    let manifest = resolved
+        .ancestors()
+        .map(|d| d.join("Cargo.toml"))
+        .find(|m| m.is_file())
+        .unwrap_or_else(|| resolved.join("Cargo.toml"));
     let metadata = MetadataCommand::new()
         .current_dir(neutral_dir())
         .manifest_path(manifest)
@@ -316,8 +322,8 @@ fn run_cargo_audit_with(root: &Path, search: Option<&OsStr>) -> Vec<AuditVuln> {
 
 /// Working directory for child cargo/cargo-audit processes. cargo, rustup and
 /// cargo-audit read `.cargo/config.toml`, `rust-toolchain.toml` and
-/// `.cargo/audit.toml` from the cwd *and its ancestors*, so it must not sit
-/// under a world-writable directory like `/tmp` (#100, #101).
+/// `.cargo/audit.toml` from the cwd (cargo and rustup also from its ancestors),
+/// so it must not sit under a world-writable directory like `/tmp` (#100, #101).
 fn neutral_dir() -> PathBuf {
     if cfg!(unix) {
         PathBuf::from("/")
@@ -1115,5 +1121,23 @@ mod tests {
         let v = run_cargo_audit_with(&root, Some(bin.as_os_str()));
         let _ = fs::remove_dir_all(&root);
         assert!(v.is_empty());
+    }
+
+    /// #112: a root without its own Cargo.toml (e.g. `src/`) must resolve to
+    /// the enclosing manifest, like cargo itself does.
+    #[test]
+    fn collect_accepts_subdirectory_of_a_package() {
+        let root = std::env::temp_dir().join(format!("rpi_issue112_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"sub\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+        let result = collect(&root.join("src"), CollectOptions::default());
+        let _ = fs::remove_dir_all(&root);
+        assert!(result.is_ok(), "collect failed: {:?}", result.err());
     }
 }
