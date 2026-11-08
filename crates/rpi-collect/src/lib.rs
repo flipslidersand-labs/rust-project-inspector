@@ -360,7 +360,10 @@ fn load_config(root: &Path) -> Config {
     }
 }
 
-/// Recursively gather `.rs` files under `dir`, skipping any `target/` output.
+/// Recursively gather `.rs` files under `dir`, skipping any `target/` output
+/// and any subdirectory that holds its own `Cargo.toml` (another crate or a
+/// nested workspace, which is collected separately or not at all; #75).
+/// `dir` itself is the crate root and is always walked.
 fn collect_rs_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     walk(dir, &mut out);
@@ -382,6 +385,9 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         }
         if ft.is_dir() {
             if path.file_name().is_some_and(|n| n == "target") {
+                continue;
+            }
+            if path.join("Cargo.toml").is_file() {
                 continue;
             }
             walk(&path, out);
@@ -479,6 +485,85 @@ mod tests {
         let files = collect_rs_files(&root);
         let _ = fs::remove_dir_all(&root);
         assert_eq!(files, vec![src.join("a.rs")]);
+    }
+
+    fn root_and_member() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/root-and-member")
+            .canonicalize()
+            .unwrap()
+    }
+
+    #[test]
+    fn root_package_does_not_absorb_member_or_nested_crates() {
+        let ctx = collect(&root_and_member(), CollectOptions::default()).unwrap();
+        let mut seen: Vec<(String, PathBuf)> = Vec::new();
+        for c in &ctx.crates {
+            for f in &c.files {
+                seen.push((c.name.clone(), f.path.clone()));
+            }
+        }
+        let mut paths: Vec<_> = seen.iter().map(|(_, p)| p.clone()).collect();
+        paths.sort();
+        paths.dedup();
+        assert_eq!(
+            paths.len(),
+            seen.len(),
+            "a file belongs to two crates: {seen:?}"
+        );
+
+        let owner = |suffix: &str| -> Vec<&str> {
+            seen.iter()
+                .filter(|(_, p)| p.ends_with(suffix))
+                .map(|(n, _)| n.as_str())
+                .collect()
+        };
+        assert_eq!(owner("member/src/lib.rs"), vec!["member"]);
+        assert_eq!(owner("root-and-member/src/lib.rs"), vec!["root_pkg"]);
+        assert!(
+            seen.iter()
+                .all(|(_, p)| !p.ends_with("tests/fixtures/nested/src/lib.rs")),
+            "nested workspace under tests/fixtures must not be collected: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn walk_skips_target_and_nested_crates_but_not_git_or_node_modules() {
+        let root = std::env::temp_dir().join(format!("rpi_issue75_walk_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for d in [
+            "src",
+            "target/debug",
+            "node_modules/x",
+            ".git/hooks",
+            "sub/src",
+        ] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        for f in [
+            "src/a.rs",
+            "target/debug/gen.rs",
+            "node_modules/x/n.rs",
+            ".git/hooks/h.rs",
+            "sub/src/b.rs",
+        ] {
+            fs::write(root.join(f), "fn f() {}\n").unwrap();
+        }
+        fs::write(root.join("Cargo.toml"), "").unwrap();
+        fs::write(root.join("sub/Cargo.toml"), "").unwrap();
+
+        let files = collect_rs_files(&root);
+        let _ = fs::remove_dir_all(&root);
+        // Documented policy: only `target/` and directories holding their own
+        // Cargo.toml are pruned; .git / node_modules are walked like any dir.
+        assert_eq!(
+            files,
+            vec![
+                root.join(".git/hooks/h.rs"),
+                root.join("node_modules/x/n.rs"),
+                root.join("src/a.rs"),
+            ]
+        );
     }
 
     #[test]
