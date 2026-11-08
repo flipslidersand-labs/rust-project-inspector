@@ -367,6 +367,32 @@ mod tests {
     }
 
     #[test]
+    fn unsafe_extern_type_macro_and_safe_items_are_not_counted() {
+        let src = r#"
+            unsafe extern "C" {
+                type T;
+                m!();
+                safe fn s();
+            }
+        "#;
+        let c = ctx_with(Config::default(), vec![krate_from_src("k", &[src])]);
+        assert!(UnsafeSurface.run(&c).is_empty());
+    }
+
+    #[test]
+    fn counts_unsafe_extern_nested_in_fn_and_mod() {
+        let src = r#"
+            fn f() { unsafe extern "C" { fn b(); } }
+            mod m { unsafe extern "C" { fn c(); } }
+        "#;
+        let c = ctx_with(Config::default(), vec![krate_from_src("k", &[src])]);
+        let findings = UnsafeSurface.run(&c);
+        assert_eq!(findings.len(), 1);
+        // `f` itself is a safe fn; only the two nested declarations count.
+        assert!(findings[0].message.starts_with("2 unsafe items"));
+    }
+
+    #[test]
     fn plain_extern_block_is_not_counted() {
         let src = r#"
             extern "C" {
