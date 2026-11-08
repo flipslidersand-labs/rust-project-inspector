@@ -111,9 +111,10 @@ rpi inspect . --baseline prior.json         # compare / 比較
 
 `rpi inspect` は対象を静的に読む(ビルドスクリプトや対象のコードは実行しない)。`cargo metadata` と `--audit` の `cargo-audit` だけは外部コマンドとして動くため、次のとおり対象側の設定が実行に影響しないようにしている。
 
-- `cargo metadata` は対象外の作業ディレクトリから `--manifest-path` で呼ぶ。対象の `.cargo/config.toml`(`build.rustc` 等)と `rust-toolchain.toml` は読まれない。
+- `cargo metadata` は対象外の作業ディレクトリ(unix では `/`。`/tmp` は他者が書けるため使わない)から `--manifest-path` で呼ぶ。対象の `.cargo/config.toml`(`build.rustc` 等)と `rust-toolchain.toml` は読まれない。
 - `--audit` は `cargo audit` ではなく `cargo-audit` を直接、対象外の作業ディレクトリで `--file <対象>/Cargo.lock` 付きで呼ぶ。対象の `[alias]` で上書きされない。
-- 副作用: 対象側の `.cargo/config.toml` に依存する設定(ベンダリング、独自 registry など)は反映されず、`cargo metadata` が失敗することがある。
+- `Cargo.lock` が無い対象の `--audit` はスキップする(cargo-audit に作らせない)。
+- 副作用: 対象側の `.cargo/audit.toml`(ignore 一覧)は読まれず、報告件数が増えることがある。対象側の `.cargo/config.toml` に依存する設定(ベンダリング、独自 registry など)は反映されず、`cargo metadata` が失敗することがある。
 
 それでも信頼できない対象は、コンテナ等の隔離環境で実行すること。
 

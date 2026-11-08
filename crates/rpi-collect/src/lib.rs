@@ -50,7 +50,7 @@ fn collect_inner(root: &Path, opts: CollectOptions) -> Result<Context> {
         .with_context(|| format!("cannot resolve {}", root.display()))?
         .join("Cargo.toml");
     let metadata = MetadataCommand::new()
-        .current_dir(std::env::temp_dir())
+        .current_dir(neutral_dir())
         .manifest_path(manifest)
         .exec()
         .context("failed to run `cargo metadata`")?;
@@ -271,14 +271,27 @@ fn run_cargo_audit_with(root: &Path, search: Option<&OsStr>) -> Vec<AuditVuln> {
     let Some(bin) = search.and_then(|d| which::which_in("cargo-audit", Some(d), ".").ok()) else {
         return Vec::new();
     };
-    let lock = root
-        .canonicalize()
-        .unwrap_or_else(|_| root.to_path_buf())
-        .join("Cargo.lock");
+    let lock = match root.canonicalize() {
+        Ok(r) => r.join("Cargo.lock"),
+        Err(e) => {
+            eprintln!(
+                "warn: cannot resolve {} ({e}); skipping audit-bridge",
+                root.display()
+            );
+            return Vec::new();
+        }
+    };
+    if !lock.is_file() {
+        eprintln!(
+            "[skip] audit-bridge: {} not found (run `cargo generate-lockfile` first)",
+            lock.display()
+        );
+        return Vec::new();
+    }
     let output = Command::new(bin)
         .args(["audit", "--json", "--file"])
         .arg(lock)
-        .current_dir(std::env::temp_dir())
+        .current_dir(neutral_dir())
         .output();
     match output {
         Ok(out) if !out.stdout.is_empty() => {
@@ -301,12 +314,28 @@ fn run_cargo_audit_with(root: &Path, search: Option<&OsStr>) -> Vec<AuditVuln> {
     }
 }
 
+/// Working directory for child cargo/cargo-audit processes. cargo, rustup and
+/// cargo-audit read `.cargo/config.toml`, `rust-toolchain.toml` and
+/// `.cargo/audit.toml` from the cwd *and its ancestors*, so it must not sit
+/// under a world-writable directory like `/tmp` (#100, #101).
+fn neutral_dir() -> PathBuf {
+    if cfg!(unix) {
+        PathBuf::from("/")
+    } else {
+        std::env::temp_dir()
+    }
+}
+
 /// Directories searched for external tools: `PATH` plus `$CARGO_HOME/bin`
 /// (default `~/.cargo/bin`), which is where `cargo` itself also looks for
 /// `cargo-*` subcommands. `None` when neither is known.
 fn search_path() -> Option<OsString> {
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
+        .map(|p| {
+            std::env::split_paths(&p)
+                .filter(|d| d.is_absolute())
+                .collect()
+        })
         .unwrap_or_default();
     let cargo_home = std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
@@ -1038,6 +1067,7 @@ mod tests {
         let bin = base.join("bin");
         fs::create_dir_all(root.join(".cargo")).unwrap();
         fs::create_dir_all(&bin).unwrap();
+        fs::write(root.join("Cargo.lock"), "").unwrap();
         fs::write(
             root.join(".cargo/config.toml"),
             "[alias]\naudit = \"run --bin evil --\"\n",
@@ -1065,5 +1095,25 @@ mod tests {
             logged.contains(&format!("args=audit --json --file {root_str}/Cargo.lock")),
             "unexpected invocation: {logged}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn neutral_dir_is_not_under_tmp() {
+        assert_eq!(neutral_dir(), PathBuf::from("/"));
+    }
+
+    #[test]
+    fn audit_without_lockfile_is_skipped() {
+        let root = std::env::temp_dir().join(format!("rpi_issue101_nolock_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        #[cfg(unix)]
+        write_exec(&bin.join("cargo-audit"), "#!/bin/sh\nexit 1\n");
+        let v = run_cargo_audit_with(&root, Some(bin.as_os_str()));
+        let _ = fs::remove_dir_all(&root);
+        assert!(v.is_empty());
     }
 }
