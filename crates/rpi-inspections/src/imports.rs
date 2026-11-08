@@ -25,9 +25,10 @@ pub fn file_use_roots(ast: &syn::File) -> BTreeSet<String> {
     let mut v = RootCollector {
         include_all_paths: false,
         roots: BTreeSet::new(),
+        local_names: BTreeSet::new(),
     };
     v.visit_file(ast);
-    v.roots
+    v.finish()
 }
 
 /// Distinct crate roots referenced anywhere — `use` trees, attribute macros,
@@ -37,17 +38,32 @@ pub fn file_reference_roots(ast: &syn::File) -> BTreeSet<String> {
     let mut v = RootCollector {
         include_all_paths: true,
         roots: BTreeSet::new(),
+        local_names: BTreeSet::new(),
     };
     v.visit_file(ast);
-    v.roots
+    v.finish()
 }
 
 struct RootCollector {
     include_all_paths: bool,
     roots: BTreeSet<String>,
+    /// Names that shadow an external crate: `extern crate foo as bar` aliases
+    /// (#96) and `mod x` declared in this file (#99). Removed at the end so
+    /// declaration order does not matter. File-wide approximation: a `mod x`
+    /// nested in another module also shadows. A `mod` sharing a name with an
+    /// external crate is treated as the local module (it shadows the crate).
+    local_names: BTreeSet<String>,
 }
 
 impl RootCollector {
+    fn finish(self) -> BTreeSet<String> {
+        let local = self.local_names;
+        self.roots
+            .into_iter()
+            .filter(|r| !local.contains(r))
+            .collect()
+    }
+
     fn add(&mut self, ident: String) {
         if !KEYWORDS.contains(&ident.as_str()) {
             self.roots.insert(ident);
@@ -79,7 +95,19 @@ impl<'ast> Visit<'ast> for RootCollector {
     fn visit_item_extern_crate(&mut self, i: &'ast syn::ItemExternCrate) {
         // `self` is filtered by `add` via KEYWORDS (`extern crate self as x;`).
         self.add(i.ident.to_string());
+        // The alias (`as bar`) is not a crate name. `as _` and `as foo`
+        // (same name) introduce nothing to exclude.
+        if let Some((_, alias)) = &i.rename {
+            if *alias != i.ident && alias != "_" {
+                self.local_names.insert(alias.to_string());
+            }
+        }
         visit::visit_item_extern_crate(self, i);
+    }
+
+    fn visit_item_mod(&mut self, i: &'ast syn::ItemMod) {
+        self.local_names.insert(i.ident.to_string());
+        visit::visit_item_mod(self, i);
     }
 
     fn visit_path(&mut self, p: &'ast syn::Path) {
@@ -211,6 +239,45 @@ mod tests {
                 "reference roots: {src}"
             );
         }
+    }
+
+    /// #96: `extern crate foo as bar;` の別名 `bar` は crate 名ではないので
+    /// roots に入れない。`as _` は別名なし。順序(use が先)でも結果は同じ。
+    #[test]
+    fn extern_crate_alias_is_not_a_root() {
+        let cases: &[(&str, &[&str])] = &[
+            ("extern crate foo as bar; use bar::X;", &["foo"]),
+            ("use bar::X; extern crate foo as bar;", &["foo"]),
+            ("extern crate foo as _;", &["foo"]),
+            ("extern crate foo as foo; use foo::X;", &["foo"]),
+            ("extern crate alloc;", &["alloc"]),
+        ];
+        for (src, want) in cases {
+            let ast = syn::parse_file(src).unwrap_or_else(|e| panic!("parse {src:?}: {e}"));
+            assert_eq!(file_use_roots(&ast), set(want), "use roots: {src}");
+            assert_eq!(file_reference_roots(&ast), set(want), "ref roots: {src}");
+        }
+        let ast = syn::parse_file("extern crate foo as bar; fn f() { bar::go(); }").unwrap();
+        assert_eq!(file_reference_roots(&ast), set(&["foo"]));
+    }
+
+    /// #99: 同ファイルの `mod x` は自 crate 内なので roots に入れない。
+    /// 外部 crate と同名でも mod が shadow するので除外する。
+    #[test]
+    fn local_mod_names_are_not_roots() {
+        let cases: &[(&str, &[&str])] = &[
+            ("mod util; use util::x;", &[]),
+            ("mod util { pub fn x() {} } use util::x;", &[]),
+            ("use util::x; mod util;", &[]),
+            ("mod serde; use serde::X; use other::Y;", &["other"]),
+            ("mod a { mod util {} } use util::x;", &[]),
+        ];
+        for (src, want) in cases {
+            let ast = syn::parse_file(src).unwrap_or_else(|e| panic!("parse {src:?}: {e}"));
+            assert_eq!(file_use_roots(&ast), set(want), "use roots: {src}");
+        }
+        let ast = syn::parse_file("mod util; fn f() { util::go(); }").unwrap();
+        assert!(file_reference_roots(&ast).is_empty());
     }
 
     #[test]
