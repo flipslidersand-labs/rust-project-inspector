@@ -97,7 +97,8 @@ impl<'ast> Visit<'ast> for Counter {
     }
 
     fn visit_attribute(&mut self, a: &'ast syn::Attribute) {
-        // Catches `#[test]`, `#[tokio::test]`, `#[rstest]`-style last segments.
+        // Catches attributes whose last path segment is exactly `test`
+        // (`#[test]`, `#[tokio::test]`). `#[rstest]` etc. are not matched.
         if a.path().segments.last().is_some_and(|s| s.ident == "test") {
             self.stats.has_test = true;
         }
