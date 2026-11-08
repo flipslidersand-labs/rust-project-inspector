@@ -313,6 +313,8 @@ mod tests {
 
     #[test]
     fn match_guard_condition_operators_are_counted() {
+        // guard 自体は decision point として加算しない(現仕様。syn 3 では
+        // Pat::Guard で、visit_pat_guard が無い)。guard 内の && / || のみ加算。
         // base(1) + 2 arms(2) + `&&` in guard(1) = 4
         let src = "fn f(a: bool, b: bool) { match a { x if x && b => {} _ => {} } }";
         assert_eq!(score_of(src, "f"), 4);
