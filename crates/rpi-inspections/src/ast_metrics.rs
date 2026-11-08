@@ -57,6 +57,13 @@ impl<'ast> Visit<'ast> for Counter {
         visit::visit_impl_item_fn(self, f);
     }
 
+    fn visit_trait_item_fn(&mut self, f: &'ast syn::TraitItemFn) {
+        if matches!(f.sig.safety, syn::Safety::Unsafe(_)) {
+            self.stats.unsafe_count += 1;
+        }
+        visit::visit_trait_item_fn(self, f);
+    }
+
     fn visit_item_impl(&mut self, i: &'ast syn::ItemImpl) {
         if i.unsafety.is_some() {
             self.stats.unsafe_count += 1;
@@ -293,6 +300,7 @@ mod tests {
             root_dir: PathBuf::from(format!("/w/{name}")),
             workspace_deps: Vec::new(),
             external_deps: Vec::new(),
+            external_dep_packages: Default::default(),
             files,
         }
     }
@@ -444,6 +452,89 @@ mod tests {
             "{:?}",
             f[0].message
         );
+    }
+
+    #[test]
+    fn unsafe_fn_in_trait_counts_one() {
+        let src = "trait T { unsafe fn f(&self); }";
+        let c = ctx_with(Config::default(), vec![krate_from_src("k", &[src])]);
+        let f = UnsafeSurface.run(&c);
+        assert_eq!(f.len(), 1, "{:?}", f);
+        assert!(
+            f[0].message.starts_with("1 unsafe item"),
+            "{:?}",
+            f[0].message
+        );
+    }
+
+    // --- unsafe-surface: density threshold boundary ---
+
+    /// One unsafe item in a file forced to 200 LOC; returns (ctx-ready crate, density).
+    fn one_unsafe_in_200_loc() -> (CrateData, f64) {
+        let mut k = krate_from_src("k", &["pub unsafe fn a() {}"]);
+        k.files[0].loc = 200;
+        (k, 1.0_f64 / 200.0 * 1000.0)
+    }
+
+    #[test]
+    fn unsafe_density_equal_to_threshold_is_info() {
+        let (k, density) = one_unsafe_in_200_loc();
+        let cfg = Config {
+            unsafe_density_warn: density,
+            ..Default::default()
+        };
+        let f = UnsafeSurface.run(&ctx_with(cfg, vec![k]));
+        assert_eq!(f[0].severity, Severity::Info);
+    }
+
+    #[test]
+    fn unsafe_density_just_over_threshold_is_warn() {
+        let (k, density) = one_unsafe_in_200_loc();
+        let cfg = Config {
+            unsafe_density_warn: density - 0.001,
+            ..Default::default()
+        };
+        let f = UnsafeSurface.run(&ctx_with(cfg, vec![k]));
+        assert_eq!(f[0].severity, Severity::Warn);
+    }
+
+    #[test]
+    fn unsafe_density_below_threshold_is_info() {
+        let (k, density) = one_unsafe_in_200_loc();
+        let cfg = Config {
+            unsafe_density_warn: density + 1.0,
+            ..Default::default()
+        };
+        let f = UnsafeSurface.run(&ctx_with(cfg, vec![k]));
+        assert_eq!(f[0].severity, Severity::Info);
+    }
+
+    #[test]
+    fn unsafe_density_zero_loc_is_zero_and_info() {
+        let mut k = krate_from_src("k", &["pub unsafe fn a() {}"]);
+        k.files[0].loc = 0;
+        let f = UnsafeSurface.run(&ctx_with(Config::default(), vec![k]));
+        assert_eq!(f[0].metric, Some(0.0));
+        assert_eq!(f[0].severity, Severity::Info);
+    }
+
+    // --- pub-surface: threshold boundary ---
+
+    #[test]
+    fn pub_surface_equal_to_threshold_is_info_and_over_is_warn() {
+        let src = "pub fn a() {} pub fn b() {}";
+        let at = Config {
+            pub_surface_warn: 2,
+            ..Default::default()
+        };
+        let f = PubSurface.run(&ctx_with(at, vec![krate_from_src("k", &[src])]));
+        assert_eq!(f[0].severity, Severity::Info);
+        let under = Config {
+            pub_surface_warn: 1,
+            ..Default::default()
+        };
+        let f = PubSurface.run(&ctx_with(under, vec![krate_from_src("k", &[src])]));
+        assert_eq!(f[0].severity, Severity::Warn);
     }
 
     // --- pub-surface: restricted visibility not counted ---
