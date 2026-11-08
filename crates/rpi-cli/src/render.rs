@@ -5,6 +5,7 @@
 //! grouped by severity. `json` is the stable machine format.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use anyhow::Result;
 use rpi_core::{Report, Severity};
@@ -49,11 +50,11 @@ pub fn sarif(report: &Report) -> Result<String> {
             // Code Scanning requires at least one location; fall back to the
             // workspace manifest for findings without a file.
             let uri = match &f.location.file {
-                Some(file) => file
-                    .strip_prefix(root)
-                    .unwrap_or(file)
-                    .display()
-                    .to_string(),
+                Some(file) => match file.strip_prefix(root) {
+                    Ok(rel) => path_to_uri(rel),
+                    // Outside the workspace root: keep the path unchanged.
+                    Err(_) => file.display().to_string(),
+                },
                 None => "Cargo.toml".to_string(),
             };
             let line = f.location.span.map(|(s, _)| s).unwrap_or(1).max(1);
@@ -138,6 +139,16 @@ fn baseline_severity_counts(baseline: &serde_json::Value) -> Option<(usize, usiz
         }
     }
     Some((e, w, i))
+}
+
+/// Joins path components with '/' as required for a SARIF `artifactLocation.uri`,
+/// regardless of the host OS separator (#90).
+/// 相対パス専用。RootDir/Prefix を含むと '//' になるため、strip_prefix 成功後の相対パスにだけ使う。
+fn path_to_uri(p: &Path) -> String {
+    p.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn sarif_level(sev: Severity) -> &'static str {
@@ -258,6 +269,7 @@ fn push(out: &mut String, line: &str) {
 mod tests {
     use super::*;
     use rpi_core::{Finding, Location, Metrics, WorkspaceInfo};
+    use std::path::PathBuf;
 
     fn finding(inspection: &'static str, sev: Severity, krate: &str) -> Finding {
         Finding {
@@ -441,7 +453,27 @@ mod tests {
         assert_eq!(runs[0]["tool"]["driver"]["name"], "rust-project-inspector");
     }
 
-    // uri の '/' 区切り正規化は #90 で扱う。Linux では検証できない。
+    // OS 非依存: component 列から組み立てたパスを '/' で連結することを検証する。
+    // (`Path::new("a\\b")` は Windows では 2 component だが Linux では 1 component
+    // のため、ここでは検証しない。)
+    #[test]
+    fn path_to_uri_joins_components_with_slash() {
+        let p = PathBuf::from_iter(["crates", "k", "a.rs"]);
+        assert_eq!(path_to_uri(&p), "crates/k/a.rs");
+        assert_eq!(path_to_uri(Path::new("a.rs")), "a.rs");
+    }
+
+    // `components()` drops a mid-path `.`, `display()` does not: pins the call site.
+    #[test]
+    fn sarif_uri_goes_through_path_to_uri() {
+        let v = sarif_one(Some("/repo/crates/./k/a.rs"), None);
+        let uri = v["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
+            ["artifactLocation"]["uri"]
+            .as_str()
+            .unwrap();
+        assert_eq!(uri, "crates/k/a.rs");
+    }
+
     #[test]
     fn sarif_nested_file_uri_is_relative() {
         let v = sarif_one(Some("/repo/crates/k/src/deep/mod.rs"), Some((3, 4)));
