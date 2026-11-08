@@ -167,7 +167,10 @@ pub fn text(report: &Report) -> String {
     push(&mut out, "rust-project-inspector");
     push(
         &mut out,
-        &format!("  root:     {}", report.workspace.root.display()),
+        &format!(
+            "  root:     {}",
+            sanitize_for_terminal(&report.workspace.root.display().to_string())
+        ),
     );
     push(&mut out, &format!("  crates:   {}", m.crate_count));
     push(
@@ -235,7 +238,10 @@ fn render_ranking(out: &mut String, report: &Report) {
     for (name, (score, err, warn, info)) in ranked {
         push(
             out,
-            &format!("    {score:>5}  {err:>3} {warn:>4} {info:>4}  {name}"),
+            &format!(
+                "    {score:>5}  {err:>3} {warn:>4} {info:>4}  {}",
+                sanitize_for_terminal(name)
+            ),
         );
     }
 }
@@ -254,10 +260,32 @@ fn render_findings(out: &mut String, report: &Report) {
             let scope = f.location.krate.as_deref().unwrap_or("workspace");
             push(
                 out,
-                &format!("    [{tag}] {} ({scope}): {}", f.inspection, f.message),
+                &format!(
+                    "    [{tag}] {} ({}): {}",
+                    sanitize_for_terminal(f.inspection),
+                    sanitize_for_terminal(scope),
+                    sanitize_for_terminal(&f.message)
+                ),
             );
         }
     }
+}
+
+/// Makes externally sourced strings (file names, crate names, messages) safe to
+/// print to a terminal. C0 controls (including `\n` and `\t`: line layout is
+/// produced by the renderer itself, so any newline inside a value is hostile),
+/// DEL and C1 controls become `\u{..}`. Printable text (CJK, emoji, spaces) is unchanged.
+pub(crate) fn sanitize_for_terminal(s: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_control() {
+            let _ = write!(out, "\\u{{{:x}}}", c as u32);
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn push(out: &mut String, line: &str) {
@@ -307,6 +335,27 @@ mod tests {
         let low = text.find("low").unwrap();
         // The error crate must be ranked above the warn crate.
         assert!(high < low, "high-risk crate should appear first:\n{text}");
+    }
+
+    #[test]
+    fn text_escapes_control_chars_in_external_strings() {
+        let mut f = finding("x", Severity::Warn, "k\u{1b}[31mcrate");
+        f.message = "bad \u{1b}]0;title\u{7}\u{9b}x\nfake line".into();
+        let mut r = report(vec![f]);
+        r.workspace.root = PathBuf::from("/tmp/\u{1b}[2Jroot");
+        let out = text(&r);
+        assert!(!out.contains('\u{1b}'), "raw ESC leaked: {out:?}");
+        assert!(!out.contains('\u{7}') && !out.contains('\u{9b}'));
+        assert!(out.contains("\\u{1b}"));
+        // Only the renderer's own line breaks remain.
+        assert!(!out.contains("bad \u{1b}") && !out.contains("\nfake line"));
+    }
+
+    #[test]
+    fn sanitize_keeps_normal_text() {
+        let s = "日本語 パス/with space/😀.rs";
+        assert_eq!(sanitize_for_terminal(s), s);
+        assert_eq!(sanitize_for_terminal("a\tb\u{7f}"), "a\\u{9}b\\u{7f}");
     }
 
     #[test]
