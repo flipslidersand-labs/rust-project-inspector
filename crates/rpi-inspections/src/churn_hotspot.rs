@@ -73,6 +73,7 @@ mod tests {
             root_dir: PathBuf::from("/w/k"),
             workspace_deps: Vec::new(),
             external_deps: Vec::new(),
+            external_dep_packages: Default::default(),
             files: vec![SourceFile {
                 path: path.clone(),
                 loc: 1,
