@@ -26,6 +26,7 @@ pub fn file_use_roots(ast: &syn::File) -> BTreeSet<String> {
         include_all_paths: false,
         roots: BTreeSet::new(),
         local_names: BTreeSet::new(),
+        absolute_roots: BTreeSet::new(),
     };
     v.visit_file(ast);
     v.finish()
@@ -39,6 +40,7 @@ pub fn file_reference_roots(ast: &syn::File) -> BTreeSet<String> {
         include_all_paths: true,
         roots: BTreeSet::new(),
         local_names: BTreeSet::new(),
+        absolute_roots: BTreeSet::new(),
     };
     v.visit_file(ast);
     v.finish()
@@ -53,15 +55,21 @@ struct RootCollector {
     /// nested in another module also shadows. A `mod` sharing a name with an
     /// external crate is treated as the local module (it shadows the crate).
     local_names: BTreeSet<String>,
+    /// Roots reached via a leading `::`; always an external crate, so never
+    /// removed by `local_names`.
+    absolute_roots: BTreeSet<String>,
 }
 
 impl RootCollector {
     fn finish(self) -> BTreeSet<String> {
         let local = self.local_names;
-        self.roots
+        let mut out: BTreeSet<String> = self
+            .roots
             .into_iter()
             .filter(|r| !local.contains(r))
-            .collect()
+            .collect();
+        out.extend(self.absolute_roots);
+        out
     }
 
     fn add(&mut self, ident: String) {
@@ -70,15 +78,29 @@ impl RootCollector {
         }
     }
 
+    fn add_absolute(&mut self, ident: String) {
+        if !KEYWORDS.contains(&ident.as_str()) {
+            self.absolute_roots.insert(ident);
+        }
+    }
+
+    fn add_root(&mut self, ident: String, absolute: bool) {
+        if absolute {
+            self.add_absolute(ident);
+        } else {
+            self.add(ident);
+        }
+    }
+
     /// Extract leading idents from a use tree in root position.
-    fn collect_use(&mut self, tree: &syn::UseTree) {
+    fn collect_use(&mut self, tree: &syn::UseTree, absolute: bool) {
         match tree {
-            syn::UseTree::Path(p) => self.add(p.ident.to_string()),
-            syn::UseTree::Name(n) => self.add(n.ident.to_string()),
-            syn::UseTree::Rename(r) => self.add(r.ident.to_string()),
+            syn::UseTree::Path(p) => self.add_root(p.ident.to_string(), absolute),
+            syn::UseTree::Name(n) => self.add_root(n.ident.to_string(), absolute),
+            syn::UseTree::Rename(r) => self.add_root(r.ident.to_string(), absolute),
             syn::UseTree::Group(g) => {
                 for item in &g.items {
-                    self.collect_use(item);
+                    self.collect_use(item, absolute);
                 }
             }
             syn::UseTree::Glob(_) => {}
@@ -88,7 +110,7 @@ impl RootCollector {
 
 impl<'ast> Visit<'ast> for RootCollector {
     fn visit_item_use(&mut self, i: &'ast syn::ItemUse) {
-        self.collect_use(&i.tree);
+        self.collect_use(&i.tree, i.leading_colon.is_some());
         visit::visit_item_use(self, i);
     }
 
@@ -98,7 +120,7 @@ impl<'ast> Visit<'ast> for RootCollector {
         // The alias (`as bar`) is not a crate name. `as _` and `as foo`
         // (same name) introduce nothing to exclude.
         if let Some((_, alias)) = &i.rename {
-            if *alias != i.ident && alias != "_" {
+            if *alias != i.ident {
                 self.local_names.insert(alias.to_string());
             }
         }
@@ -117,7 +139,7 @@ impl<'ast> Visit<'ast> for RootCollector {
             // `use`. Only `a::b` / `::a` can name an external crate. (#98)
             if p.segments.len() > 1 || p.leading_colon.is_some() {
                 if let Some(first) = p.segments.first() {
-                    self.add(first.ident.to_string());
+                    self.add_root(first.ident.to_string(), p.leading_colon.is_some());
                 }
             }
         }
@@ -278,6 +300,21 @@ mod tests {
         }
         let ast = syn::parse_file("mod util; fn f() { util::go(); }").unwrap();
         assert!(file_reference_roots(&ast).is_empty());
+    }
+
+    /// 先頭 `::` は常に外部 crate を指すので、mod 名/別名の shadow 除外の対象外。
+    #[test]
+    fn leading_colon_roots_are_not_shadowed() {
+        let ast = syn::parse_file("mod serde { use ::serde::Serialize; }").unwrap();
+        assert_eq!(file_use_roots(&ast), set(&["serde"]));
+        assert_eq!(file_reference_roots(&ast), set(&["serde"]));
+        let ast = syn::parse_file("mod serde {} use ::{serde::X};").unwrap();
+        assert_eq!(file_use_roots(&ast), set(&["serde"]));
+        let ast = syn::parse_file("mod serde {} fn f() { let _: ::serde::X; }").unwrap();
+        assert_eq!(file_reference_roots(&ast), set(&["serde"]));
+        assert!(file_use_roots(&ast).is_empty());
+        let ast = syn::parse_file("extern crate foo as bar; fn f() { ::bar::go(); }").unwrap();
+        assert_eq!(file_reference_roots(&ast), set(&["bar", "foo"]));
     }
 
     #[test]
