@@ -360,18 +360,19 @@ fn load_config(root: &Path) -> Config {
     }
 }
 
-/// Recursively gather `.rs` files under `dir`, skipping any `target/` output
+/// Recursively gather `.rs` files under `dir`, skipping the crate root's own
+/// `target/` output (a deeper `src/target/` module is real source; #97)
 /// and any subdirectory that holds its own `Cargo.toml` (another crate or a
 /// nested workspace, which is collected separately or not at all; #75).
 /// `dir` itself is the crate root and is always walked.
 fn collect_rs_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    walk(dir, &mut out);
+    walk(dir, true, &mut out);
     out.sort();
     out
 }
 
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+fn walk(dir: &Path, is_root: bool, out: &mut Vec<PathBuf>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -384,13 +385,13 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
             continue;
         }
         if ft.is_dir() {
-            if path.file_name().is_some_and(|n| n == "target") {
+            if is_root && path.file_name().is_some_and(|n| n == "target") {
                 continue;
             }
             if path.join("Cargo.toml").is_file() {
                 continue;
             }
-            walk(&path, out);
+            walk(&path, false, out);
         } else if path.extension().is_some_and(|e| e == "rs") {
             out.push(path);
         }
@@ -564,6 +565,21 @@ mod tests {
                 root.join("src/a.rs"),
             ]
         );
+    }
+
+    #[test]
+    fn walk_keeps_nested_target_module_but_skips_root_target() {
+        let root = std::env::temp_dir().join(format!("rpi_issue97_walk_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for d in ["src/target", "target/debug"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        for f in ["src/target/mod.rs", "target/debug/gen.rs"] {
+            fs::write(root.join(f), "pub fn f() {}\n").unwrap();
+        }
+        let files = collect_rs_files(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(files, vec![root.join("src/target/mod.rs")]);
     }
 
     #[test]
