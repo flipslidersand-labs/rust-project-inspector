@@ -2,8 +2,8 @@
 //!
 //! Complexity = 1 + decision points, where a decision point is any `if`,
 //! `while`, `for`, `loop`, `match` arm, `&&`/`||`, or `?`. This is a syn-level
-//! approximation: nested functions contribute to their enclosing function's
-//! count as well as their own.
+//! approximation: nested functions are counted separately and do not
+//! contribute to their enclosing function's count.
 
 use rpi_core::{Context, Finding, Inspection, Location, Severity};
 use syn::visit::{self, Visit};
@@ -99,6 +99,10 @@ struct DecisionCounter {
 }
 
 impl<'ast> Visit<'ast> for DecisionCounter {
+    // Nested fns are recorded by `FnCollector`; don't count them twice.
+    fn visit_item_fn(&mut self, _: &'ast syn::ItemFn) {}
+    fn visit_impl_item_fn(&mut self, _: &'ast syn::ImplItemFn) {}
+    fn visit_trait_item_fn(&mut self, _: &'ast syn::TraitItemFn) {}
     fn visit_expr_if(&mut self, e: &'ast syn::ExprIf) {
         self.points += 1;
         visit::visit_expr_if(self, e);
@@ -159,6 +163,18 @@ mod tests {
         // 1 base + if(1) + &&(1) + for(1) + 2 arms(2) = 6
         let c = function_complexities(&file(src));
         assert_eq!(c[0].1, 6);
+    }
+
+    #[test]
+    fn nested_fn_is_not_double_counted_in_file_total() {
+        // outer owns one `if` -> 2; inner has two `if`s -> 3; total 5.
+        // (Before the fix outer also absorbed inner's ifs: 4 + 3 = 7.)
+        let src = "fn outer(a: bool) { if a {} fn inner(b: bool) { if b { if b {} } } }";
+        let ast = file(src);
+        let c = function_complexities(&ast);
+        assert_eq!(c[0], ("outer".to_string(), 2));
+        assert_eq!(c[1], ("inner".to_string(), 3));
+        assert_eq!(file_complexity(&ast), 5);
     }
 
     #[test]
@@ -298,12 +314,12 @@ mod tests {
     }
 
     #[test]
-    fn nested_fn_counts_toward_outer_and_itself() {
+    fn nested_fn_is_scored_separately_from_outer() {
         // inner: base(1) + if(1) = 2.
-        // outer: base(1) + inner's if(1) = 2 (documented approximation).
+        // outer: base(1) only; inner's `if` is not counted here (#99).
         let src = "fn outer(a: bool) { fn inner(b: bool) { if b {} } let _ = a; }";
         assert_eq!(score_of(src, "inner"), 2);
-        assert_eq!(score_of(src, "outer"), 2);
+        assert_eq!(score_of(src, "outer"), 1);
     }
 
     #[test]
