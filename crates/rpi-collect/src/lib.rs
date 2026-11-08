@@ -62,9 +62,15 @@ fn collect_inner(root: &Path, opts: CollectOptions) -> Result<Context> {
         let mut workspace_deps = Vec::new();
         let mut external_deps = Vec::new();
         for dep in &pkg.dependencies {
+            // Only normal dependencies form the build graph. A dev/build edge
+            // between members (a --dev--> b --normal--> a) is legal in Cargo and
+            // must not be read as a cycle (#62).
+            if dep.kind != cargo_metadata::DependencyKind::Normal {
+                continue;
+            }
             if member_names.contains(&dep.name) {
                 workspace_deps.push(dep.name.clone());
-            } else if dep.kind == cargo_metadata::DependencyKind::Normal {
+            } else {
                 external_deps.push(dep.name.clone());
             }
         }
@@ -139,8 +145,10 @@ fn collect_churn(root: &Path, timeout: Duration) -> HashMap<PathBuf, usize> {
 /// [`collect_churn`] with the git invocation injected (`git` is the program and
 /// any leading arguments), so tests can substitute a stub.
 fn collect_churn_with(mut git: Command, root: &Path, timeout: Duration) -> HashMap<PathBuf, usize> {
+    // core.quotepath=false: otherwise git C-quotes non-ASCII paths ("\346...")
+    // and they would be dropped by the `.rs` filter below.
     let mut child = match git
-        .args(["-C"])
+        .args(["-c", "core.quotepath=false", "-C"])
         .arg(root)
         .args(["log", "--name-only", "--pretty=format:"])
         .stdout(Stdio::piped())
@@ -359,7 +367,12 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        //  does not follow symlinks; skip them to avoid cycles.
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
             if path.file_name().is_some_and(|n| n == "target") {
                 continue;
             }
@@ -435,6 +448,29 @@ mod tests {
         );
         // The fixture is a leaf crate: no intra-workspace deps.
         assert!(krate.workspace_deps.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_does_not_follow_symlinks() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("rpi_issue64_symlink_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join("a.rs"),
+            "fn a() {}
+",
+        )
+        .unwrap();
+        // Cycle: src/loop -> root, and a symlink to a .rs file.
+        symlink(&root, src.join("loop")).unwrap();
+        symlink(src.join("a.rs"), src.join("link.rs")).unwrap();
+
+        let files = collect_rs_files(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(files, vec![src.join("a.rs")]);
     }
 
     #[test]
@@ -702,6 +738,43 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         let ok = churn.iter().find(|(p, _)| p.ends_with("src/ok.rs"));
         assert_eq!(ok.map(|(_, n)| *n), Some(2), "UTF-8 paths lost: {churn:?}");
+    }
+
+    #[test]
+    fn collect_churn_counts_non_ascii_paths() {
+        // git quotes non-ASCII paths ("\346...") unless core.quotepath=false.
+        if Command::new("git").arg("--version").output().is_err() {
+            return; // git unavailable: nothing to exercise
+        }
+        let dir = std::env::temp_dir().join(format!("rpi_churn_quotepath_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("日本語")).unwrap();
+        std::fs::write(dir.join("日本語/モジュール.rs"), "fn a() {}\n").unwrap();
+        let git = |args: &[&str]| {
+            let ok = Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(["-c", "commit.gpgsign=false", "-C"])
+                .arg(&dir)
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            assert!(ok, "git {args:?} failed");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "日本語/モジュール.rs"]);
+        git(&["commit", "-q", "-m", "init"]);
+
+        let churn = collect_churn(&dir, Duration::from_secs(10));
+        std::fs::remove_dir_all(&dir).ok();
+        let hit = churn
+            .iter()
+            .find(|(p, _)| p.ends_with("日本語/モジュール.rs"));
+        assert_eq!(
+            hit.map(|(_, n)| *n),
+            Some(1),
+            "non-ASCII path lost: {churn:?}"
+        );
     }
 
     #[test]
