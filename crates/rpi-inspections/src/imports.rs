@@ -76,6 +76,12 @@ impl<'ast> Visit<'ast> for RootCollector {
         visit::visit_item_use(self, i);
     }
 
+    fn visit_item_extern_crate(&mut self, i: &'ast syn::ItemExternCrate) {
+        // `self` is filtered by `add` via KEYWORDS (`extern crate self as x;`).
+        self.add(i.ident.to_string());
+        visit::visit_item_extern_crate(self, i);
+    }
+
     fn visit_path(&mut self, p: &'ast syn::Path) {
         if self.include_all_paths {
             if let Some(first) = p.segments.first() {
@@ -173,14 +179,24 @@ mod tests {
         }
     }
 
-    /// 現状の挙動を固定: `extern crate foo;` は collector が扱わず、抽出結果は
-    /// 空になる(意味的には foo は外部 crate なので抽出漏れ)。修正は #92 で追跡。
+    /// `extern crate foo;` は外部 crate foo を取り込む。`as` の別名は無視し元の
+    /// crate 名を root とする。`extern crate self as x;` は自 crate なので除外。
     #[test]
-    fn extern_crate_current_behavior() {
-        let ast = syn::parse_file("extern crate foo;").unwrap();
-        let u = file_use_roots(&ast);
-        let r = file_reference_roots(&ast);
-        assert!(u.is_empty(), "use roots: {u:?}");
-        assert!(r.is_empty(), "reference roots: {r:?}");
+    fn extern_crate_adds_root() {
+        let cases: &[(&str, &[&str])] = &[
+            ("extern crate foo;", &["foo"]),
+            ("extern crate foo as bar;", &["foo"]),
+            ("pub extern crate foo;", &["foo"]),
+            ("extern crate self as x;", &[]),
+        ];
+        for (src, want) in cases {
+            let ast = syn::parse_file(src).unwrap_or_else(|e| panic!("parse {src:?}: {e}"));
+            assert_eq!(file_use_roots(&ast), set(want), "use roots: {src}");
+            assert_eq!(
+                file_reference_roots(&ast),
+                set(want),
+                "reference roots: {src}"
+            );
+        }
     }
 }
