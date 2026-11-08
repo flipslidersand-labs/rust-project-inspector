@@ -177,6 +177,13 @@ mod tests {
     }
 
     #[test]
+    fn extern_crate_only_dep_is_not_flagged() {
+        let k = krate("k", &["foo"], "extern crate foo; fn f() {}");
+        let f = DepHygiene.run(&ctx(vec![k], &[]));
+        assert!(f.is_empty(), "extern crate usage must count: {f:?}");
+    }
+
+    #[test]
     fn used_dep_is_not_flagged() {
         let k = krate("k", &["serde"], "use serde::Serialize; fn f() {}");
         let f = DepHygiene.run(&ctx(vec![k], &[]));
