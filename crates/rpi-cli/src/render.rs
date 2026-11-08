@@ -407,6 +407,63 @@ mod tests {
         assert_eq!(uri, "crates/k/src/big.rs");
     }
 
+    /// One finding with the given file/span under workspace root `/repo`.
+    fn sarif_one(file: Option<&str>, span: Option<(usize, usize)>) -> serde_json::Value {
+        use std::path::PathBuf;
+        let mut f = finding("module-size", Severity::Warn, "k");
+        f.location.file = file.map(PathBuf::from);
+        f.location.span = span;
+        let mut r = report(vec![f]);
+        r.workspace.root = PathBuf::from("/repo");
+        serde_json::from_str(&sarif(&r).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn sarif_start_line_is_one_based_and_taken_from_span() {
+        let loc = |v: &serde_json::Value| v["runs"][0]["results"][0]["locations"][0].clone();
+        let v = sarif_one(Some("/repo/a.rs"), Some((12, 15)));
+        assert_eq!(loc(&v)["physicalLocation"]["region"]["startLine"], 12);
+        // SARIF startLine must be >= 1; a 0 span start is clamped.
+        let v = sarif_one(Some("/repo/a.rs"), Some((0, 0)));
+        assert_eq!(loc(&v)["physicalLocation"]["region"]["startLine"], 1);
+        let v = sarif_one(Some("/repo/a.rs"), None);
+        assert_eq!(loc(&v)["physicalLocation"]["region"]["startLine"], 1);
+    }
+
+    #[test]
+    fn sarif_empty_report_keeps_required_shape() {
+        let v: serde_json::Value = serde_json::from_str(&sarif(&report(vec![])).unwrap()).unwrap();
+        assert_eq!(v["version"], "2.1.0");
+        let runs = v["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0]["results"], serde_json::json!([]));
+        assert_eq!(runs[0]["tool"]["driver"]["rules"], serde_json::json!([]));
+        assert_eq!(runs[0]["tool"]["driver"]["name"], "rust-project-inspector");
+    }
+
+    // uri の '/' 区切り正規化は #90 で扱う。Linux では検証できない。
+    #[test]
+    fn sarif_nested_file_uri_is_relative() {
+        let v = sarif_one(Some("/repo/crates/k/src/deep/mod.rs"), Some((3, 4)));
+        let uri = v["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
+            ["artifactLocation"]["uri"]
+            .as_str()
+            .unwrap();
+        assert_eq!(uri, "crates/k/src/deep/mod.rs");
+    }
+
+    /// Pins CURRENT behavior only (#71 (1)): a file outside the workspace root
+    /// is emitted as the unchanged absolute path. Whether that is the intended
+    /// spec is a human decision; change this test if the spec changes.
+    /// Windows で `D:\other\x.rs` が来ると有効な URI にならない可能性。現状の Linux 前提の挙動を固定。
+    #[test]
+    fn sarif_uri_outside_root_is_absolute_current_behavior() {
+        let v = sarif_one(Some("/elsewhere/x.rs"), None);
+        let uri = &v["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
+            ["artifactLocation"]["uri"];
+        assert_eq!(uri, "/elsewhere/x.rs");
+    }
+
     #[test]
     fn sarif_fileless_finding_falls_back_to_cargo_toml() {
         let r = report(vec![finding("pub-surface", Severity::Info, "k")]);

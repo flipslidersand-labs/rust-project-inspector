@@ -104,7 +104,13 @@ pub struct CrateData {
     pub workspace_deps: Vec<String>,
     /// Names of declared, normal-kind external dependencies (for
     /// `dep-hygiene`'s unused-dependency check).
+    ///
+    /// Each entry is the name the code uses to refer to the dependency: the
+    /// `package` rename when one is declared, otherwise the package name.
     pub external_deps: Vec<String>,
+    /// For renamed external deps only: reference name -> original package name
+    /// (display only).
+    pub external_dep_packages: std::collections::HashMap<String, String>,
     pub files: Vec<SourceFile>,
 }
 
