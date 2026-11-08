@@ -417,10 +417,7 @@ fn load_config(root: &Path) -> Config {
         Ok((cfg, unknown)) => {
             for key in unknown {
                 // `{:?}`: the target repo is untrusted; escape control chars.
-                eprintln!(
-                    "warn: unknown key {key:?} in {} (ignored; check for typos)",
-                    path.display()
-                );
+                eprintln!("{}", unknown_key_warning(&key, &path));
             }
             cfg
         }
@@ -429,6 +426,14 @@ fn load_config(root: &Path) -> Config {
             Config::default()
         }
     }
+}
+
+/// Warning text for an unknown `rpi.toml` key.
+fn unknown_key_warning(key: &str, path: &Path) -> String {
+    format!(
+        "warn: unknown key {key:?} in {} (ignored; check for typos)",
+        path.display()
+    )
 }
 
 /// Parse `rpi.toml` text into a [`Config`] plus the top-level keys that are
@@ -1184,5 +1189,16 @@ mod tests {
         assert!(unknown.is_empty(), "{unknown:?}");
         assert_eq!(cfg.module_size_loc, 1);
         assert_eq!(cfg.churn_git_timeout_secs, 1);
+    }
+
+    #[test]
+    fn unknown_key_warning_names_key_and_escapes_control_chars() {
+        let (_, unknown) = parse_config("\"a\\u001b[31mb\" = 1\n").unwrap();
+        assert_eq!(unknown, vec!["a\u{1b}[31mb".to_string()]);
+        let msg = unknown_key_warning(&unknown[0], Path::new("rpi.toml"));
+        assert!(!msg.contains('\u{1b}'), "{msg:?}");
+        assert!(msg.contains("a\\u{1b}[31mb"), "{msg}");
+        let plain = unknown_key_warning("modul_size_loc", Path::new("rpi.toml"));
+        assert!(plain.contains("\"modul_size_loc\""));
     }
 }

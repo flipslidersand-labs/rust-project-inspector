@@ -127,7 +127,7 @@ pub struct AuditVuln {
 ///
 /// Uses `#[serde(default)]` so a partial `rpi.toml` only overrides the keys it
 /// names and everything else keeps its default.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
     /// A single file above this many lines is flagged by `module-size`.
@@ -213,6 +213,17 @@ pub trait Inspection {
 
 #[cfg(test)]
 mod tests {
+    /// #35: `KNOWN_KEYS` must match the real `Config` fields.
+    #[test]
+    fn known_keys_match_config_fields() {
+        let v = serde_json::to_value(Config::default()).unwrap();
+        let mut fields: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        let mut known: Vec<&str> = Config::KNOWN_KEYS.to_vec();
+        fields.sort_unstable();
+        known.sort_unstable();
+        assert_eq!(fields, known);
+    }
+
     use super::*;
 
     #[test]
