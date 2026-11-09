@@ -8,6 +8,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
+use rpi_core::sanitize_for_terminal;
 use rpi_core::Report;
 
 mod render;
@@ -70,7 +71,18 @@ enum FailLevel {
     Error,
 }
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            // Error text can embed untrusted paths/names; escape control chars.
+            eprintln!("Error: {}", sanitize_for_terminal(&format!("{e:?}")));
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Inspect {
@@ -124,10 +136,24 @@ fn inspect(
     if let Some(path) = baseline {
         match load_json(&path) {
             Ok(prior) => match render::trend(&report, &prior) {
-                Ok(line) => eprintln!("{line}"),
-                Err(e) => eprintln!("warn: baseline {}: {e}", path.display()),
+                Ok(text) => {
+                    // The trend is multi-line by design; sanitize line by line.
+                    for line in text.lines() {
+                        eprintln!("{}", sanitize_for_terminal(line));
+                    }
+                }
+                Err(e) => eprintln!(
+                    "{}",
+                    sanitize_for_terminal(&format!("warn: baseline {}: {e}", path.display()))
+                ),
             },
-            Err(e) => eprintln!("warn: could not read baseline {}: {e}", path.display()),
+            Err(e) => eprintln!(
+                "{}",
+                sanitize_for_terminal(&format!(
+                    "warn: could not read baseline {}: {e}",
+                    path.display()
+                ))
+            ),
         }
     }
 

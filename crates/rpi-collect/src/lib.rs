@@ -18,6 +18,14 @@ use anyhow::{Context as _, Result};
 use cargo_metadata::MetadataCommand;
 use rpi_core::{AuditVuln, Config, Context, CrateData, SourceFile, WorkspaceInfo};
 
+/// `eprintln!` for diagnostics that may embed untrusted paths or names from the
+/// inspected repository: control/bidi characters are escaped first.
+macro_rules! safe_eprintln {
+    ($($arg:tt)*) => {
+        eprintln!("{}", rpi_core::sanitize_for_terminal(&format!($($arg)*)))
+    };
+}
+
 /// Options controlling optional, potentially-slow collection steps.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CollectOptions {
@@ -161,7 +169,7 @@ fn collect_churn(root: &Path, timeout: Duration) -> HashMap<PathBuf, usize> {
         "install git and ensure it is on PATH",
         search_path().as_deref(),
     ) {
-        eprintln!("{notice}");
+        safe_eprintln!("{notice}");
         return HashMap::new();
     }
     collect_churn_with(Command::new("git"), root, timeout)
@@ -210,7 +218,7 @@ fn collect_churn_with(mut git: Command, root: &Path, timeout: Duration) -> HashM
             // Timeout or thread panic: kill git and report.
             let _ = child.kill();
             let _ = child.wait();
-            eprintln!(
+            safe_eprintln!(
                 "warn: `git log` timed out after {}s; churn-hotspot will be skipped \
                  (increase churn_git_timeout_secs in rpi.toml to raise the limit)",
                 timeout.as_secs()
@@ -268,7 +276,7 @@ fn run_cargo_audit_with(root: &Path, search: Option<&OsStr>) -> Vec<AuditVuln> {
         "install with `cargo install cargo-audit`",
         search,
     ) {
-        eprintln!("{notice}");
+        safe_eprintln!("{notice}");
         return Vec::new();
     }
     // Call the binary directly: `cargo audit` would let the target's
@@ -280,7 +288,7 @@ fn run_cargo_audit_with(root: &Path, search: Option<&OsStr>) -> Vec<AuditVuln> {
     let lock = match root.canonicalize() {
         Ok(r) => r.join("Cargo.lock"),
         Err(e) => {
-            eprintln!(
+            safe_eprintln!(
                 "warn: cannot resolve {} ({e}); skipping audit-bridge",
                 root.display()
             );
@@ -288,7 +296,7 @@ fn run_cargo_audit_with(root: &Path, search: Option<&OsStr>) -> Vec<AuditVuln> {
         }
     };
     if !lock.is_file() {
-        eprintln!(
+        safe_eprintln!(
             "[skip] audit-bridge: {} not found (run `cargo generate-lockfile` first)",
             lock.display()
         );
@@ -302,19 +310,21 @@ fn run_cargo_audit_with(root: &Path, search: Option<&OsStr>) -> Vec<AuditVuln> {
     match output {
         Ok(out) if !out.stdout.is_empty() => {
             parse_audit_json(&String::from_utf8_lossy(&out.stdout)).unwrap_or_else(|warning| {
-                eprintln!("{warning}");
+                safe_eprintln!("{warning}");
                 Vec::new()
             })
         }
         Ok(out) => {
             if !out.stderr.is_empty() {
                 let msg = String::from_utf8_lossy(&out.stderr);
-                eprintln!("warn: `cargo audit` produced no output ({msg}); skipping audit-bridge");
+                safe_eprintln!(
+                    "warn: `cargo audit` produced no output ({msg}); skipping audit-bridge"
+                );
             }
             Vec::new()
         }
         Err(e) => {
-            eprintln!("warn: `cargo audit` failed to run ({e}); skipping audit-bridge");
+            safe_eprintln!("warn: `cargo audit` failed to run ({e}); skipping audit-bridge");
             Vec::new()
         }
     }
@@ -417,12 +427,12 @@ fn load_config(root: &Path) -> Config {
         Ok((cfg, unknown)) => {
             for key in unknown {
                 // `{:?}`: the target repo is untrusted; escape control chars.
-                eprintln!("{}", unknown_key_warning(&key, &path));
+                safe_eprintln!("{}", unknown_key_warning(&key, &path));
             }
             cfg
         }
         Err(e) => {
-            eprintln!("warn: ignoring {} (parse error: {e})", path.display());
+            safe_eprintln!("warn: ignoring {} (parse error: {e})", path.display());
             Config::default()
         }
     }
@@ -497,7 +507,7 @@ fn parse_file(path: &Path) -> Option<SourceFile> {
     match try_parse_file(path) {
         Ok(f) => Some(f),
         Err(msg) => {
-            eprintln!("{msg}");
+            safe_eprintln!("{msg}");
             None
         }
     }
