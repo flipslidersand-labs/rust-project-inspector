@@ -19,6 +19,110 @@ pub fn json(report: &Report) -> Result<String> {
     Ok(escape_json_hostile(serde_json::to_string_pretty(report)?))
 }
 
+const SUMMARY_TOP_N: usize = 3;
+
+/// Aggregated counts behind `--summary` (shared by text and JSON output).
+struct Summary {
+    total: usize,
+    counts: (usize, usize, usize),
+    /// (inspection, findings), most hits first.
+    inspections: Vec<(&'static str, usize)>,
+    /// (crate, score, errors, warns), highest risk first.
+    crates: Vec<(String, u64, u32, u32)>,
+}
+
+fn summarize(report: &Report) -> Summary {
+    let mut by_insp: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut by_crate: BTreeMap<String, (u64, u32, u32)> = BTreeMap::new();
+    for f in &report.findings {
+        *by_insp.entry(f.inspection).or_default() += 1;
+        let c = by_crate
+            .entry(
+                f.location
+                    .krate
+                    .clone()
+                    .unwrap_or_else(|| "workspace".into()),
+            )
+            .or_default();
+        match f.severity {
+            Severity::Error => {
+                c.0 += W_ERROR;
+                c.1 += 1;
+            }
+            Severity::Warn => {
+                c.0 += W_WARN;
+                c.2 += 1;
+            }
+            Severity::Info => c.0 += W_INFO,
+        }
+    }
+    let mut inspections: Vec<_> = by_insp.into_iter().collect();
+    inspections.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    inspections.truncate(SUMMARY_TOP_N);
+    let mut crates: Vec<_> = by_crate
+        .into_iter()
+        .map(|(n, (s, e, w))| (n, s, e, w))
+        .collect();
+    crates.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    crates.truncate(SUMMARY_TOP_N);
+    Summary {
+        total: report.findings.len(),
+        counts: severity_counts(report),
+        inspections,
+        crates,
+    }
+}
+
+/// Aggregate summary block for `--summary` (text form).
+pub fn summary(report: &Report) -> String {
+    let s = summarize(report);
+    let (e, w, i) = s.counts;
+    let mut out = String::new();
+    push(&mut out, "=== Summary ===");
+    push(&mut out, &format!("Total findings : {}", s.total));
+    push(&mut out, &format!("  error        : {e:>2}"));
+    push(&mut out, &format!("  warn         : {w:>2}"));
+    push(&mut out, &format!("  info         : {i:>2}"));
+    push(&mut out, "");
+    push(&mut out, "Top inspections:");
+    for (name, n) in &s.inspections {
+        push(
+            &mut out,
+            &format!("  {} {n:>4} findings", sanitize_for_terminal(name)),
+        );
+    }
+    push(&mut out, "");
+    push(&mut out, "Top crates at risk:");
+    for (name, score, err, warn) in &s.crates {
+        push(
+            &mut out,
+            &format!(
+                "  {}  score={score}  (error={err}, warn={warn})",
+                sanitize_for_terminal(name)
+            ),
+        );
+    }
+    out
+}
+
+/// JSON report with a top-level `summary` object (`--summary --format json`).
+pub fn json_with_summary(report: &Report) -> Result<String> {
+    let s = summarize(report);
+    let mut v = serde_json::to_value(report)?;
+    v["summary"] = serde_json::json!({
+        "total": s.total,
+        "error": s.counts.0,
+        "warn": s.counts.1,
+        "info": s.counts.2,
+        "top_inspections": s.inspections.iter()
+            .map(|(n, c)| serde_json::json!({"inspection": n, "count": c})).collect::<Vec<_>>(),
+        "top_crates": s.crates.iter()
+            .map(|(n, sc, e, w)| serde_json::json!({"crate": n, "score": sc, "error": e, "warn": w}))
+            .collect::<Vec<_>>(),
+    });
+    Ok(escape_json_hostile(serde_json::to_string_pretty(&v)?))
+}
+
 /// SARIF 2.1.0 for GitHub Code Scanning.
 ///
 /// File paths are emitted relative to the workspace root so GitHub can anchor
