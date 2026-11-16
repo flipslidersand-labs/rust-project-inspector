@@ -485,6 +485,21 @@ fn verbose_prints_per_inspection_timing_to_stderr() {
     }
 }
 
+/// #25: collect (cargo metadata・パース・git log) の時間も出す。無いと
+/// タイムアウト原因が inspection 側にあるように見える。
+#[test]
+fn verbose_prints_collect_timing_first() {
+    let out = run_inspect(&["--verbose"]);
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let lines: Vec<&str> = stderr.lines().filter(|l| l.starts_with("[rpi] ")).collect();
+    let first = lines.first().expect("no timing lines");
+    assert!(
+        first.starts_with("[rpi] collect") && first.ends_with("ms"),
+        "collect timing must come first: {first}"
+    );
+}
+
 #[test]
 fn without_verbose_no_timing_and_stdout_unchanged() {
     let plain = run_inspect(&[]);
