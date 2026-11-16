@@ -445,6 +445,32 @@ fn run_inspect(extra: &[&str]) -> std::process::Output {
         .expect("rpi binary must be runnable")
 }
 
+/// #63: `--fail-on` の終了コード。fixture/multi は Warn を含み Error を含まない。
+#[test]
+fn fail_on_warn_exits_1_after_printing_report() {
+    let out = run_inspect(&["--format", "json", "--fail-on", "warn"]);
+    assert_eq!(out.status.code(), Some(1));
+    // exit する前にレポートが出ている(CI でも結果が読める)。
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .expect("report must be printed as JSON before exiting 1");
+    assert!(report["findings"].as_array().is_some_and(|f| !f.is_empty()));
+}
+
+#[test]
+fn fail_on_error_exits_0_when_only_warnings_exist() {
+    let out = run_inspect(&["--fail-on", "error"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(!out.stdout.is_empty(), "report must still be printed");
+}
+
+#[test]
+fn without_fail_on_exits_0_even_with_findings() {
+    let out = run_inspect(&["--format", "json"]);
+    assert_eq!(out.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(report["findings"].as_array().is_some_and(|f| !f.is_empty()));
+}
+
 #[test]
 fn verbose_prints_per_inspection_timing_to_stderr() {
     let out = run_inspect(&["--verbose"]);
