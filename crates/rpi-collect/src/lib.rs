@@ -1523,6 +1523,51 @@ mod tests {
         assert!(result.is_ok(), "collect failed: {:?}", result.err());
     }
 
+    /// #68: `load_config` falls back to defaults on every bad-input shape and
+    /// applies a partial file on top of the defaults.
+    fn load_from(name: &str, toml: Option<&str>) -> Config {
+        let dir = scratch(name);
+        if let Some(t) = toml {
+            std::fs::write(dir.join("rpi.toml"), t).unwrap();
+        }
+        let cfg = load_config(&dir);
+        std::fs::remove_dir_all(&dir).ok();
+        cfg
+    }
+
+    #[test]
+    fn load_config_missing_file_is_default() {
+        let cfg = load_from("cfg_missing", None);
+        assert_eq!(cfg.module_size_loc, Config::default().module_size_loc);
+    }
+
+    #[test]
+    fn load_config_partial_keeps_other_keys_default() {
+        let d = Config::default();
+        let cfg = load_from("cfg_partial", Some("module_size_loc = 10\n"));
+        assert_eq!(cfg.module_size_loc, 10);
+        assert_eq!(cfg.pub_surface_warn, d.pub_surface_warn);
+        assert_eq!(cfg.coupling_warn, d.coupling_warn);
+        assert_eq!(cfg.churn_git_timeout_secs, d.churn_git_timeout_secs);
+    }
+
+    #[test]
+    fn load_config_syntax_error_falls_back_to_default() {
+        let cfg = load_from("cfg_syntax", Some("module_size_loc = = 10\n[[\n"));
+        assert_eq!(cfg.module_size_loc, Config::default().module_size_loc);
+    }
+
+    #[test]
+    fn load_config_wrong_type_falls_back_to_default() {
+        let cfg = load_from(
+            "cfg_type",
+            Some("module_size_loc = \"x\"\ncoupling_warn = 7\n"),
+        );
+        // The whole file is rejected, so even the valid key is not applied.
+        assert_eq!(cfg.module_size_loc, Config::default().module_size_loc);
+        assert_eq!(cfg.coupling_warn, Config::default().coupling_warn);
+    }
+
     /// #35: a typo'd key is reported, valid keys are not, and known values
     /// are still applied.
     #[test]
