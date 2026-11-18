@@ -63,11 +63,7 @@ fn collect_inner(root: &Path, opts: CollectOptions) -> Result<Context> {
         .map(|d| d.join("Cargo.toml"))
         .find(|m| m.is_file())
         .unwrap_or_else(|| resolved.join("Cargo.toml"));
-    let metadata = MetadataCommand::new()
-        .current_dir(neutral_dir())
-        .manifest_path(manifest)
-        .exec()
-        .context("failed to run `cargo metadata`")?;
+    let metadata = run_metadata(&manifest)?;
 
     // Names of workspace members, used to split intra- vs external deps.
     let member_names: BTreeSet<String> = metadata
@@ -154,6 +150,42 @@ fn collect_inner(root: &Path, opts: CollectOptions) -> Result<Context> {
         audit,
         churn,
     })
+}
+
+/// Run `cargo metadata` without letting it touch the target's `Cargo.lock` or
+/// the network (#135). `--frozen` fails when the lock is missing or stale; then
+/// warn and retry the plain call, restoring the original lock state afterwards
+/// so the inspected repository is left unmodified.
+fn run_metadata(manifest: &Path) -> Result<cargo_metadata::Metadata> {
+    let build = |frozen: bool| {
+        let mut cmd = MetadataCommand::new();
+        cmd.current_dir(neutral_dir()).manifest_path(manifest);
+        if frozen {
+            cmd.other_options(vec!["--frozen".to_string()]);
+        }
+        cmd.exec()
+    };
+    let first = match build(true) {
+        Ok(m) => return Ok(m),
+        Err(e) => e,
+    };
+    safe_eprintln!(
+        "warn: `cargo metadata --frozen` failed ({first}); retrying without it (Cargo.lock is restored afterwards)"
+    );
+    let lock = manifest.with_file_name("Cargo.lock");
+    let original = fs::read(&lock).ok();
+    let result = build(false);
+    match original {
+        Some(bytes) => {
+            if fs::read(&lock).ok().as_deref() != Some(bytes.as_slice()) {
+                let _ = fs::write(&lock, bytes);
+            }
+        }
+        None => {
+            let _ = fs::remove_file(&lock);
+        }
+    }
+    result.context("failed to run `cargo metadata`")
 }
 
 /// Count how many commits touched each `.rs` file, via `git log --name-only`.
@@ -1547,5 +1579,44 @@ mod tests {
         assert!(msg.contains("a\\u{1b}[31mb"), "{msg}");
         let plain = unknown_key_warning("modul_size_loc", Path::new("rpi.toml"));
         assert!(plain.contains("\"modul_size_loc\""));
+    }
+
+    fn lock_fixture(tag: &str, lock: Option<&str>) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("rpi_issue135_{tag}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"lk\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn a() {}\n").unwrap();
+        if let Some(l) = lock {
+            fs::write(root.join("Cargo.lock"), l).unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn collect_does_not_rewrite_stale_cargo_lock() {
+        // Lock records a different version than the manifest: plain
+        // `cargo metadata` would rewrite it (#135).
+        let stale = "version = 3\n\n[[package]]\nname = \"lk\"\nversion = \"0.0.1\"\n";
+        let root = lock_fixture("stale", Some(stale));
+        let ctx = collect(&root, CollectOptions::default());
+        let after = fs::read_to_string(root.join("Cargo.lock")).unwrap();
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(after, stale, "Cargo.lock must not be modified");
+        assert!(ctx.is_ok(), "stale lock must still collect via fallback");
+    }
+
+    #[test]
+    fn collect_without_cargo_lock_succeeds_and_creates_none() {
+        let root = lock_fixture("nolock", None);
+        let ctx = collect(&root, CollectOptions::default());
+        let created = root.join("Cargo.lock").exists();
+        let _ = fs::remove_dir_all(&root);
+        assert!(ctx.is_ok(), "missing lock must still collect");
+        assert!(!created, "Cargo.lock must not be created in the target");
     }
 }
