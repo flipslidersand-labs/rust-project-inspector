@@ -172,17 +172,40 @@ fn run_metadata(manifest: &Path) -> Result<cargo_metadata::Metadata> {
     safe_eprintln!(
         "warn: `cargo metadata --frozen` failed ({first}); retrying without it (Cargo.lock is restored afterwards)"
     );
-    let lock = manifest.with_file_name("Cargo.lock");
-    let original = fs::read(&lock).ok();
-    let result = build(false);
-    match original {
-        Some(bytes) => {
-            if fs::read(&lock).ok().as_deref() != Some(bytes.as_slice()) {
-                let _ = fs::write(&lock, bytes);
+    // cargo writes the lock at the workspace root, which may be any ancestor
+    // of a member manifest (or not exist yet), so snapshot every candidate.
+    let snapshot: Vec<(PathBuf, Option<Vec<u8>>)> = manifest
+        .ancestors()
+        .skip(1)
+        .map(|d| d.join("Cargo.lock"))
+        .filter_map(|lock| match fs::read(&lock) {
+            Ok(bytes) => Some((lock, Some(bytes))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some((lock, None)),
+            Err(e) => {
+                safe_eprintln!(
+                    "warn: cannot read {} ({e}); it will not be restored",
+                    lock.display()
+                );
+                None
             }
-        }
-        None => {
-            let _ = fs::remove_file(&lock);
+        })
+        .collect();
+    let result = build(false);
+    for (lock, original) in snapshot {
+        let restored = match &original {
+            Some(bytes) => {
+                if fs::read(&lock).ok().as_deref() == Some(bytes.as_slice()) {
+                    continue;
+                }
+                fs::write(&lock, bytes)
+            }
+            None => match fs::remove_file(&lock) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                r => r,
+            },
+        };
+        if let Err(e) = restored {
+            safe_eprintln!("warn: failed to restore {} ({e})", lock.display());
         }
     }
     result.context("failed to run `cargo metadata`")
@@ -1618,5 +1641,32 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         assert!(ctx.is_ok(), "missing lock must still collect");
         assert!(!created, "Cargo.lock must not be created in the target");
+    }
+
+    #[test]
+    fn collect_restores_workspace_root_lock_from_member() {
+        let root = std::env::temp_dir().join(format!("rpi_issue135_ws_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("m/src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"m\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("m/Cargo.toml"),
+            "[package]\nname = \"m\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("m/src/lib.rs"), "pub fn a() {}\n").unwrap();
+        let stale = "version = 3\n\n[[package]]\nname = \"m\"\nversion = \"0.0.1\"\n";
+        fs::write(root.join("Cargo.lock"), stale).unwrap();
+        let ctx = collect(&root.join("m"), CollectOptions::default());
+        let after = fs::read_to_string(root.join("Cargo.lock")).unwrap();
+        let member_lock = root.join("m/Cargo.lock").exists();
+        let _ = fs::remove_dir_all(&root);
+        assert!(ctx.is_ok());
+        assert_eq!(after, stale, "workspace root Cargo.lock must be restored");
+        assert!(!member_lock);
     }
 }
