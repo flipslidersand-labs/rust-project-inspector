@@ -77,7 +77,8 @@ fn main() -> std::process::ExitCode {
         Err(e) => {
             // Error text can embed untrusted paths/names; escape control chars.
             eprintln!("Error: {}", sanitize_for_terminal(&format!("{e:?}")));
-            std::process::ExitCode::FAILURE
+            // 2 = tool failure; 1 is reserved for `--fail-on` threshold hits.
+            std::process::ExitCode::from(2)
         }
     }
 }

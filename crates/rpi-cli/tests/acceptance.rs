@@ -511,3 +511,36 @@ fn without_verbose_no_timing_and_stdout_unchanged() {
     serde_json::from_slice::<serde_json::Value>(&json_verbose.stdout)
         .expect("stdout must stay valid JSON with --verbose");
 }
+
+/// Run the real binary and return its exit code.
+fn exit_code(args: &[&std::ffi::OsStr]) -> Option<i32> {
+    std::process::Command::new(env!("CARGO_BIN_EXE_rpi"))
+        .arg("inspect")
+        .args(args)
+        .output()
+        .expect("rpi binary must be runnable")
+        .status
+        .code()
+}
+
+#[test]
+fn exit_code_is_0_on_success() {
+    assert_eq!(exit_code(&[fixture().as_os_str()]), Some(0));
+}
+
+#[test]
+fn exit_code_is_1_when_fail_on_threshold_is_exceeded() {
+    let f = fixture();
+    let args = [f.as_os_str(), "--fail-on".as_ref(), "warn".as_ref()];
+    assert_eq!(exit_code(&args), Some(1));
+}
+
+#[test]
+fn exit_code_is_2_when_collection_fails() {
+    let missing = std::env::temp_dir().join(format!("rpi_missing_{}", std::process::id()));
+    assert!(!missing.exists());
+    assert_eq!(exit_code(&[missing.as_os_str()]), Some(2));
+    // Also with --fail-on: a collection failure must not look like a threshold hit.
+    let args = [missing.as_os_str(), "--fail-on".as_ref(), "warn".as_ref()];
+    assert_eq!(exit_code(&args), Some(2));
+}
