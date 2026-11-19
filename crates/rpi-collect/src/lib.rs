@@ -302,31 +302,38 @@ fn run_cargo_audit_with(root: &Path, search: Option<&OsStr>) -> Vec<AuditVuln> {
         );
         return Vec::new();
     }
-    let output = Command::new(bin)
-        .args(["audit", "--json", "--file"])
+    let mut cmd = Command::new(bin);
+    cmd.args(["audit", "--json", "--file"])
         .arg(lock)
-        .current_dir(neutral_dir())
-        .output();
-    match output {
+        .current_dir(neutral_dir());
+    run_audit_command(cmd).unwrap_or_else(|warning| {
+        safe_eprintln!("{warning}");
+        Vec::new()
+    })
+}
+
+/// Run a prepared `cargo-audit` command and interpret its output. Non-empty
+/// stdout is parsed (cargo-audit exits 1 when it finds vulnerabilities, so the
+/// exit status is deliberately ignored). `Err` carries the `warn: ...` message
+/// to print; `Ok(vec![])` with nothing to report is a silent empty result.
+fn run_audit_command(mut cmd: Command) -> Result<Vec<AuditVuln>, String> {
+    match cmd.output() {
         Ok(out) if !out.stdout.is_empty() => {
-            parse_audit_json(&String::from_utf8_lossy(&out.stdout)).unwrap_or_else(|warning| {
-                safe_eprintln!("{warning}");
-                Vec::new()
-            })
+            parse_audit_json(&String::from_utf8_lossy(&out.stdout))
         }
         Ok(out) => {
-            if !out.stderr.is_empty() {
+            if out.stderr.is_empty() {
+                Ok(Vec::new())
+            } else {
                 let msg = String::from_utf8_lossy(&out.stderr);
-                safe_eprintln!(
+                Err(format!(
                     "warn: `cargo audit` produced no output ({msg}); skipping audit-bridge"
-                );
+                ))
             }
-            Vec::new()
         }
-        Err(e) => {
-            safe_eprintln!("warn: `cargo audit` failed to run ({e}); skipping audit-bridge");
-            Vec::new()
-        }
+        Err(e) => Err(format!(
+            "warn: `cargo audit` failed to run ({e}); skipping audit-bridge"
+        )),
     }
 }
 
@@ -1592,5 +1599,86 @@ mod tests {
         assert!(msg.contains("a\\u{1b}[31mb"), "{msg}");
         let plain = unknown_key_warning("modul_size_loc", Path::new("rpi.toml"));
         assert!(plain.contains("\"modul_size_loc\""));
+    }
+
+    #[cfg(unix)]
+    fn audit_stub(name: &str, body: &str) -> (PathBuf, Command) {
+        let dir = scratch(&format!("audit_stub_{name}"));
+        let script = dir.join("audit-stub.sh");
+        fs::write(&script, body).unwrap();
+        let mut cmd = Command::new("sh");
+        cmd.arg(script);
+        (dir, cmd)
+    }
+
+    /// cargo-audit exits 1 when it finds vulnerabilities; stdout must still be parsed.
+    #[cfg(unix)]
+    #[test]
+    fn audit_command_parses_json_despite_exit_1() {
+        let json = r#"{"vulnerabilities":{"list":[{"advisory":{"id":"RUSTSEC-1","title":"t"},"package":{"name":"p","version":"1.0.0"}}]}}"#;
+        let (dir, cmd) = audit_stub("exit1", &format!("printf '%s' '{json}'\nexit 1\n"));
+        let r = run_audit_command(cmd);
+        let _ = fs::remove_dir_all(&dir);
+        let v = r.unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].id, "RUSTSEC-1");
+        assert_eq!(v[0].package, "p");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_command_empty_stdout_with_stderr_warns() {
+        let (dir, cmd) = audit_stub("stderr", "echo boom >&2\nexit 2\n");
+        let r = run_audit_command(cmd);
+        let _ = fs::remove_dir_all(&dir);
+        let w = r.unwrap_err();
+        assert!(w.contains("produced no output"), "{w}");
+        assert!(w.contains("boom"), "{w}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_command_empty_output_is_silent_empty() {
+        let (dir, cmd) = audit_stub("silent", "exit 0\n");
+        let r = run_audit_command(cmd);
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(r.unwrap().len(), 0);
+    }
+
+    #[test]
+    fn audit_command_spawn_failure_is_err() {
+        let cmd = Command::new("/nonexistent/rpi-no-such-cargo-audit");
+        let w = run_audit_command(cmd).unwrap_err();
+        assert!(w.contains("failed to run"), "{w}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_command_invalid_json_is_err() {
+        let (dir, cmd) = audit_stub("garbage", "echo not-json\n");
+        let r = run_audit_command(cmd);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(r.unwrap_err().contains("not valid JSON"));
+    }
+
+    /// Pinned current behavior: entries missing fields are kept as Findings
+    /// with empty-string id/title/package/version (not dropped, not an error).
+    #[test]
+    fn audit_json_missing_entry_fields_become_empty_strings() {
+        let json = r#"{"vulnerabilities":{"list":[{},{"advisory":{"id":"X"}},{"advisory":{"id":5,"title":null},"package":{"name":"p"}}]}}"#;
+        let v = parse_audit_json(json).unwrap();
+        assert_eq!(v.len(), 3);
+        assert_eq!(
+            (
+                v[0].id.as_str(),
+                v[0].title.as_str(),
+                v[0].package.as_str(),
+                v[0].version.as_str()
+            ),
+            ("", "", "", "")
+        );
+        assert_eq!((v[1].id.as_str(), v[1].title.as_str()), ("X", ""));
+        assert_eq!((v[2].id.as_str(), v[2].title.as_str()), ("", ""));
+        assert_eq!((v[2].package.as_str(), v[2].version.as_str()), ("p", ""));
     }
 }
