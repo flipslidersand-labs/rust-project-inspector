@@ -1,7 +1,7 @@
 # rust-project-inspector 詳細設計
 
 > Static analysis tool for Rust projects
-> **作成:** 2026-08-17 / **状態:** 設計フェーズ（scaffold → 設計確定）
+> **作成:** 2026-08-17 / **状態:** 実装済み（10 inspection・text/json/sarif・`--fail-on`・`--baseline`）。このファイルは当初の設計で、現状との差分は各節の「※実装差」に記す。変更履歴は [CHANGELOG.md](CHANGELOG.md)、利用方法は [README.md](README.md)。
 
 ---
 
@@ -59,12 +59,12 @@ rpi         → "fluxion-core ⇄ fluxion-host に循環依存。
 6. **dep-hygiene** — 未使用依存の近似検出（`Cargo.toml` の deps vs `use` 解析）、version 重複（同一 crate 複数版）。
 7. **coupling** — module 間 `use` 参照から結合度（fan-in/fan-out）を算出。God module 検出。
 8. **audit-bridge** — `cargo audit --json` を呼び結果統合。
-9. **doc-coverage** — `pub` item のうち doc comment 欠落率。
+9. **doc-coverage** — `pub` item のうち doc comment 欠落率。※実装差: 未実装(`rpi_inspections::all()` の10件に含まれない)。
 
 ### Phase 3
 10. **complexity** — 関数の循環的複雑度（AST から近似）。
 11. **churn×complexity** — `git log` の変更頻度 × 複雑度でリスクホットスポット。
-12. **trend** — 過去実行結果を保存し、メトリクスの時系列推移（劣化検知）。
+12. **trend** — 過去実行結果を保存し、メトリクスの時系列推移（劣化検知）。※実装差: inspection ではなく `--baseline` による保存済み JSON との比較(結果は stderr)。churn×complexity は `churn-hotspot` として実装。
 
 ---
 
@@ -78,7 +78,7 @@ rpi         → "fluxion-core ⇄ fluxion-host に循環依存。
                  │  2. parse      syn → per-file AST          │
                  │  3. inspect    Vec<dyn Inspection>         │
                  │  4. aggregate  Findings → Report           │
-                 │  5. render     text / json / sarif / md    │
+                 │  5. render     text / json / sarif         │
                  └──────────────────────────────────────────┘
 ```
 
@@ -130,11 +130,14 @@ pub trait Inspection {
 
 ```bash
 rpi inspect [PATH]                 # 既定: カレント workspace
-rpi inspect --format json|sarif|md|text
-rpi inspect --only unsafe-surface,test-gap
-rpi inspect --fail-on warn          # CI 用: 閾値超過で非0終了
-rpi inspect --baseline .rpi.json    # 前回比較（trend）
+rpi inspect --format json|sarif|text
+rpi inspect --fail-on warn|error    # CI 用: 該当 severity 以上があれば exit 1
+rpi inspect --baseline prior.json   # 保存済み JSON との比較（trend、stderr に出力）
+rpi inspect --audit                 # cargo-audit を実行し audit-bridge を有効化
+rpi inspect --verbose               # 各 inspection の所要時間を stderr に出力
 ```
+
+※実装差: 当初案の `--format md` と `--only <inspection,...>` は実装していない。全 inspection を常に実行する。
 
 - **text**: 人間向けサマリ（crate ランキング表 + top findings）。
 - **sarif**: GitHub Code Scanning にそのまま食わせられる（既存 CI 資産と接続）。

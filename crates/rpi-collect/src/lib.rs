@@ -90,13 +90,19 @@ fn collect_inner(root: &Path, opts: CollectOptions) -> Result<Context> {
             if dep.kind != cargo_metadata::DependencyKind::Normal {
                 continue;
             }
+            // The same dependency under several `[target.*.dependencies]`
+            // tables arrives as one edge per table; list it once (#133).
             if member_names.contains(&dep.name) {
-                workspace_deps.push(dep.name.clone());
+                if !workspace_deps.contains(&dep.name) {
+                    workspace_deps.push(dep.name.clone());
+                }
             } else {
                 // Code refers to a renamed dependency by its rename; keep the
                 // original package name separately for display (#66).
                 let reference = dep.rename.as_deref().unwrap_or(&dep.name);
-                external_deps.push(reference.to_string());
+                if !external_deps.iter().any(|d| d == reference) {
+                    external_deps.push(reference.to_string());
+                }
                 if reference != dep.name {
                     external_dep_packages.insert(reference.to_string(), dep.name.clone());
                 }
@@ -357,31 +363,38 @@ fn run_cargo_audit_with(root: &Path, search: Option<&OsStr>) -> Vec<AuditVuln> {
         );
         return Vec::new();
     }
-    let output = Command::new(bin)
-        .args(["audit", "--json", "--file"])
+    let mut cmd = Command::new(bin);
+    cmd.args(["audit", "--json", "--file"])
         .arg(lock)
-        .current_dir(neutral_dir())
-        .output();
-    match output {
+        .current_dir(neutral_dir());
+    run_audit_command(cmd).unwrap_or_else(|warning| {
+        safe_eprintln!("{warning}");
+        Vec::new()
+    })
+}
+
+/// Run a prepared `cargo-audit` command and interpret its output. Non-empty
+/// stdout is parsed (cargo-audit exits 1 when it finds vulnerabilities, so the
+/// exit status is deliberately ignored). `Err` carries the `warn: ...` message
+/// to print; `Ok(vec![])` with nothing to report is a silent empty result.
+fn run_audit_command(mut cmd: Command) -> Result<Vec<AuditVuln>, String> {
+    match cmd.output() {
         Ok(out) if !out.stdout.is_empty() => {
-            parse_audit_json(&String::from_utf8_lossy(&out.stdout)).unwrap_or_else(|warning| {
-                safe_eprintln!("{warning}");
-                Vec::new()
-            })
+            parse_audit_json(&String::from_utf8_lossy(&out.stdout))
         }
         Ok(out) => {
-            if !out.stderr.is_empty() {
+            if out.stderr.is_empty() {
+                Ok(Vec::new())
+            } else {
                 let msg = String::from_utf8_lossy(&out.stderr);
-                safe_eprintln!(
+                Err(format!(
                     "warn: `cargo audit` produced no output ({msg}); skipping audit-bridge"
-                );
+                ))
             }
-            Vec::new()
         }
-        Err(e) => {
-            safe_eprintln!("warn: `cargo audit` failed to run ({e}); skipping audit-bridge");
-            Vec::new()
-        }
+        Err(e) => Err(format!(
+            "warn: `cargo audit` failed to run ({e}); skipping audit-bridge"
+        )),
     }
 }
 
@@ -1222,6 +1235,34 @@ mod tests {
         );
     }
 
+    /// #133: the same dependency under several `[target.*.dependencies]`
+    /// tables must be listed once.
+    #[test]
+    fn target_specific_duplicate_dependency_is_listed_once() {
+        let dir = scratch("target_dup_dep");
+        std::fs::create_dir_all(dir.join("bar/src")).unwrap();
+        std::fs::create_dir_all(dir.join("app/src")).unwrap();
+        std::fs::write(
+            dir.join("bar/Cargo.toml"),
+            "[package]\nname = \"bar\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("bar/src/lib.rs"), "pub fn b() {}\n").unwrap();
+        std::fs::write(
+            dir.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
+             [target.'cfg(unix)'.dependencies]\nbar = { path = \"../bar\" }\n\
+             [target.'cfg(windows)'.dependencies]\nbar = { path = \"../bar\" }\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("app/src/lib.rs"), "").unwrap();
+
+        let ctx = collect(&dir.join("app"), CollectOptions::default());
+        std::fs::remove_dir_all(&dir).ok();
+        let ctx = ctx.expect("collection must succeed");
+        assert_eq!(ctx.crates[0].external_deps, vec!["bar".to_string()]);
+    }
+
     #[test]
     fn hyphenated_rename_keeps_toml_key_as_reference_name() {
         let dir = scratch("renamed_dep_hyphen");
@@ -1319,21 +1360,6 @@ mod tests {
         let churn = collect_churn(&tmp, Duration::from_secs(10));
         std::fs::remove_dir_all(&tmp).ok();
         assert!(churn.is_empty(), "non-git root must yield empty churn");
-    }
-
-    #[test]
-    fn collect_churn_returns_empty_on_near_zero_timeout() {
-        // A 1ms timeout against a real git repo should either complete fast or
-        // time out — either way the function must return without panicking.
-        // We only assert no panic and that the result is a valid HashMap.
-        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../")
-            .canonicalize()
-            .unwrap();
-        let churn = collect_churn(&repo, Duration::from_millis(1));
-        // Result may or may not be empty depending on system speed; just verify
-        // the function terminates and the map is well-formed.
-        let _ = churn.len();
     }
 
     /// Write an executable-free shell stub (run as `sh <script>`) into a fresh
@@ -1441,6 +1467,69 @@ mod tests {
             hit.map(|(_, n)| *n),
             Some(1),
             "non-ASCII path lost: {churn:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_churn_times_out_and_returns_empty_quickly() {
+        // The stub sleeps far longer than the 200ms limit: the timeout branch
+        // must kill it and return an empty map well before the sleep ends.
+        let (dir, cmd) = stub_git("timeout", "sleep 5\nprintf 'src/a.rs\n'\n");
+        let start = std::time::Instant::now();
+        let churn = collect_churn_with(cmd, &dir, Duration::from_millis(200));
+        let elapsed = start.elapsed();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(churn.is_empty(), "timed-out git must yield empty churn");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "timeout not enforced promptly: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn collect_churn_anchors_keys_at_git_toplevel_for_subdir_workspace() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return; // git unavailable: nothing to exercise
+        }
+        let repo = scratch("churn_anchor");
+        let ws = repo.join("crates/x");
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("src/lib.rs"), "fn a() {}\n").unwrap();
+        // Isolate from the host's git configuration.
+        let isolated = |cmd: &mut Command| {
+            cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1");
+        };
+        let git = |args: &[&str]| {
+            let mut cmd = Command::new("git");
+            isolated(&mut cmd);
+            let ok = cmd
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(["-c", "commit.gpgsign=false", "-C"])
+                .arg(&repo)
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            assert!(ok, "git {args:?} failed");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "crates/x/src/lib.rs"]);
+        git(&["commit", "-q", "-m", "init"]);
+
+        // The workspace root is the subdirectory, not the repo toplevel.
+        let mut cmd = Command::new("git");
+        isolated(&mut cmd);
+        let churn = collect_churn_with(cmd, &ws, Duration::from_secs(10));
+        // Canonicalize: TMPDIR may be a symlink.
+        let expected = ws.join("src/lib.rs").canonicalize().unwrap();
+        std::fs::remove_dir_all(&repo).ok();
+        assert_eq!(
+            churn.get(&expected).copied(),
+            Some(1),
+            "churn keys must match canonical file paths: {churn:?}"
         );
     }
 
@@ -1571,6 +1660,51 @@ mod tests {
         assert!(result.is_ok(), "collect failed: {:?}", result.err());
     }
 
+    /// #68: `load_config` falls back to defaults on every bad-input shape and
+    /// applies a partial file on top of the defaults.
+    fn load_from(name: &str, toml: Option<&str>) -> Config {
+        let dir = scratch(name);
+        if let Some(t) = toml {
+            std::fs::write(dir.join("rpi.toml"), t).unwrap();
+        }
+        let cfg = load_config(&dir);
+        std::fs::remove_dir_all(&dir).ok();
+        cfg
+    }
+
+    #[test]
+    fn load_config_missing_file_is_default() {
+        let cfg = load_from("cfg_missing", None);
+        assert_eq!(cfg.module_size_loc, Config::default().module_size_loc);
+    }
+
+    #[test]
+    fn load_config_partial_keeps_other_keys_default() {
+        let d = Config::default();
+        let cfg = load_from("cfg_partial", Some("module_size_loc = 10\n"));
+        assert_eq!(cfg.module_size_loc, 10);
+        assert_eq!(cfg.pub_surface_warn, d.pub_surface_warn);
+        assert_eq!(cfg.coupling_warn, d.coupling_warn);
+        assert_eq!(cfg.churn_git_timeout_secs, d.churn_git_timeout_secs);
+    }
+
+    #[test]
+    fn load_config_syntax_error_falls_back_to_default() {
+        let cfg = load_from("cfg_syntax", Some("module_size_loc = = 10\n[[\n"));
+        assert_eq!(cfg.module_size_loc, Config::default().module_size_loc);
+    }
+
+    #[test]
+    fn load_config_wrong_type_falls_back_to_default() {
+        let cfg = load_from(
+            "cfg_type",
+            Some("module_size_loc = \"x\"\ncoupling_warn = 7\n"),
+        );
+        // The whole file is rejected, so even the valid key is not applied.
+        assert_eq!(cfg.module_size_loc, Config::default().module_size_loc);
+        assert_eq!(cfg.coupling_warn, Config::default().coupling_warn);
+    }
+
     /// #35: a typo'd key is reported, valid keys are not, and known values
     /// are still applied.
     #[test]
@@ -1668,5 +1802,86 @@ mod tests {
         assert!(ctx.is_ok());
         assert_eq!(after, stale, "workspace root Cargo.lock must be restored");
         assert!(!member_lock);
+    }
+
+    #[cfg(unix)]
+    fn audit_stub(name: &str, body: &str) -> (PathBuf, Command) {
+        let dir = scratch(&format!("audit_stub_{name}"));
+        let script = dir.join("audit-stub.sh");
+        fs::write(&script, body).unwrap();
+        let mut cmd = Command::new("sh");
+        cmd.arg(script);
+        (dir, cmd)
+    }
+
+    /// cargo-audit exits 1 when it finds vulnerabilities; stdout must still be parsed.
+    #[cfg(unix)]
+    #[test]
+    fn audit_command_parses_json_despite_exit_1() {
+        let json = r#"{"vulnerabilities":{"list":[{"advisory":{"id":"RUSTSEC-1","title":"t"},"package":{"name":"p","version":"1.0.0"}}]}}"#;
+        let (dir, cmd) = audit_stub("exit1", &format!("printf '%s' '{json}'\nexit 1\n"));
+        let r = run_audit_command(cmd);
+        let _ = fs::remove_dir_all(&dir);
+        let v = r.unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].id, "RUSTSEC-1");
+        assert_eq!(v[0].package, "p");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_command_empty_stdout_with_stderr_warns() {
+        let (dir, cmd) = audit_stub("stderr", "echo boom >&2\nexit 2\n");
+        let r = run_audit_command(cmd);
+        let _ = fs::remove_dir_all(&dir);
+        let w = r.unwrap_err();
+        assert!(w.contains("produced no output"), "{w}");
+        assert!(w.contains("boom"), "{w}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_command_empty_output_is_silent_empty() {
+        let (dir, cmd) = audit_stub("silent", "exit 0\n");
+        let r = run_audit_command(cmd);
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(r.unwrap().len(), 0);
+    }
+
+    #[test]
+    fn audit_command_spawn_failure_is_err() {
+        let cmd = Command::new("/nonexistent/rpi-no-such-cargo-audit");
+        let w = run_audit_command(cmd).unwrap_err();
+        assert!(w.contains("failed to run"), "{w}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_command_invalid_json_is_err() {
+        let (dir, cmd) = audit_stub("garbage", "echo not-json\n");
+        let r = run_audit_command(cmd);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(r.unwrap_err().contains("not valid JSON"));
+    }
+
+    /// Pinned current behavior: entries missing fields are kept as Findings
+    /// with empty-string id/title/package/version (not dropped, not an error).
+    #[test]
+    fn audit_json_missing_entry_fields_become_empty_strings() {
+        let json = r#"{"vulnerabilities":{"list":[{},{"advisory":{"id":"X"}},{"advisory":{"id":5,"title":null},"package":{"name":"p"}}]}}"#;
+        let v = parse_audit_json(json).unwrap();
+        assert_eq!(v.len(), 3);
+        assert_eq!(
+            (
+                v[0].id.as_str(),
+                v[0].title.as_str(),
+                v[0].package.as_str(),
+                v[0].version.as_str()
+            ),
+            ("", "", "", "")
+        );
+        assert_eq!((v[1].id.as_str(), v[1].title.as_str()), ("X", ""));
+        assert_eq!((v[2].id.as_str(), v[2].title.as_str()), ("", ""));
+        assert_eq!((v[2].package.as_str(), v[2].version.as_str()), ("p", ""));
     }
 }

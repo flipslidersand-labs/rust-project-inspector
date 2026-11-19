@@ -201,4 +201,50 @@ mod tests {
             "single version must not trigger duplicate finding"
         );
     }
+
+    /// #70: derive の引数トークン内の完全修飾パスで使う依存は「使用中」。
+    #[test]
+    fn derive_qualified_path_counts_as_use() {
+        for src in [
+            "#[derive(serde::Serialize)] struct S;",
+            "#[derive(Debug, serde::Serialize, Clone)] struct S;",
+            "#[derive(::serde::Serialize)] struct S;",
+        ] {
+            let k = krate("k", &["serde"], src);
+            let f = DepHygiene.run(&ctx(vec![k], &[]));
+            assert!(f.is_empty(), "derive path must count as use: {src:?} {f:?}");
+        }
+    }
+
+    /// #70: derive が組み込みだけなら、宣言した依存は未使用のまま警告する。
+    #[test]
+    fn derive_builtin_only_still_flags_unused_dep() {
+        let k = krate("k", &["serde"], "#[derive(Debug, Clone)] struct S;");
+        let f = DepHygiene.run(&ctx(vec![k], &[]));
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].message.contains("`serde`"));
+    }
+
+    /// #70: 複数ファイルのうち 2 つ目だけが使っていても「使用中」。
+    #[test]
+    fn dep_used_only_in_second_file_counts() {
+        let mut k = krate("k", &["serde"], "pub fn a() {}");
+        k.files.push(SourceFile {
+            path: PathBuf::from("b.rs"),
+            loc: 1,
+            ast: syn::parse_file("use serde::Serialize;").unwrap(),
+        });
+        assert!(DepHygiene.run(&ctx(vec![k], &[])).is_empty());
+    }
+
+    /// #70: `use foo as bar;` は依存名 `foo` の使用。別名 `bar` は依存ではない。
+    #[test]
+    fn use_as_rename_counts_the_original_name() {
+        let k = krate("k", &["foo"], "use foo as bar; fn f() {}");
+        assert!(DepHygiene.run(&ctx(vec![k], &[])).is_empty());
+
+        let k = krate("k", &["bar"], "use foo as bar; fn f() {}");
+        let f = DepHygiene.run(&ctx(vec![k], &[]));
+        assert_eq!(f.len(), 1, "alias must not count as dep `bar`: {f:?}");
+    }
 }

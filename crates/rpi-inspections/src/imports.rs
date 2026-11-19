@@ -159,6 +159,18 @@ impl<'ast> Visit<'ast> for RootCollector {
         if let syn::Meta::NameValue(nv) = &a.meta {
             self.visit_expr(&nv.value);
         }
+        // `#[derive(serde::Serialize)]`: the derive list is raw tokens, so
+        // `visit_path` never sees it. Parse it so a fully-qualified derive
+        // counts as a reference (#70). Unparsable input is skipped.
+        if a.path().is_ident("derive") {
+            if let Ok(paths) = a.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+            ) {
+                for p in &paths {
+                    self.visit_path(p);
+                }
+            }
+        }
     }
 }
 

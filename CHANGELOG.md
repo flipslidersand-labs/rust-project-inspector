@@ -1,0 +1,39 @@
+# Changelog
+
+All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+No release has been tagged yet (workspace version `0.0.1`), so everything so far is under **Unreleased**.
+Merged PRs through #122 (2026-11-15) are listed; later PRs are added when they merge.
+
+## [Unreleased]
+
+### Added
+- Workspace scaffold, `rpi-core` types and the `rpi` CLI skeleton ([#10](https://github.com/flipslidersand-labs/rust-project-inspector/pull/10)).
+- `workspace-graph` inspection: cyclic dependencies (Tarjan SCC) and orphan crates ([#12](https://github.com/flipslidersand-labs/rust-project-inspector/pull/12)).
+- `module-size`, `unsafe-surface`, `pub-surface`, `test-gap` inspections and the `rpi.toml` thresholds ([#13](https://github.com/flipslidersand-labs/rust-project-inspector/pull/13)).
+- `rpi-collect` (`cargo_metadata` + `syn`) and the crate risk ranking table ([#15](https://github.com/flipslidersand-labs/rust-project-inspector/pull/15), [#14](https://github.com/flipslidersand-labs/rust-project-inspector/pull/14)).
+- `dep-hygiene`, `coupling`, `audit-bridge` inspections ([#17](https://github.com/flipslidersand-labs/rust-project-inspector/pull/17)).
+- SARIF 2.1.0 output, `--fail-on`, and the GitHub Code Scanning workflow ([#16](https://github.com/flipslidersand-labs/rust-project-inspector/pull/16)).
+- `complexity` and `churn-hotspot` inspections, and `--baseline` trend comparison ([#18](https://github.com/flipslidersand-labs/rust-project-inspector/pull/18)).
+- `git log` timeout setting (`churn_git_timeout_secs`) so large repositories do not hang ([#38](https://github.com/flipslidersand-labs/rust-project-inspector/pull/38)).
+- `--verbose` prints each inspection's elapsed time to stderr ([#120](https://github.com/flipslidersand-labs/rust-project-inspector/pull/120)).
+- Unknown `rpi.toml` keys are reported as a warning on stderr; known keys still apply ([#118](https://github.com/flipslidersand-labs/rust-project-inspector/pull/118)).
+- `CONTRIBUTING.md` ([#41](https://github.com/flipslidersand-labs/rust-project-inspector/pull/41)).
+
+### Changed
+- Clearer error messages when an external tool is missing and on invalid input or parse failures ([#42](https://github.com/flipslidersand-labs/rust-project-inspector/pull/42), [#44](https://github.com/flipslidersand-labs/rust-project-inspector/pull/44)).
+- Trend: a malformed baseline now warns instead of counting as 0 findings, and a worse severity mix counts as a regression even when the total is unchanged ([#59](https://github.com/flipslidersand-labs/rust-project-inspector/pull/59), [#60](https://github.com/flipslidersand-labs/rust-project-inspector/pull/60)).
+- SARIF results without a file now carry a location ([#58](https://github.com/flipslidersand-labs/rust-project-inspector/pull/58)); `artifactLocation.uri` is normalised to `/` separators ([#106](https://github.com/flipslidersand-labs/rust-project-inspector/pull/106)).
+- Control characters, C1, bidi and zero-width characters are escaped in text, JSON and stderr output ([#115](https://github.com/flipslidersand-labs/rust-project-inspector/pull/115), [#121](https://github.com/flipslidersand-labs/rust-project-inspector/pull/121)).
+- `unsafe-surface` also counts `unsafe fn` inside traits and declarations in `unsafe extern` blocks ([#83](https://github.com/flipslidersand-labs/rust-project-inspector/pull/83), [#94](https://github.com/flipslidersand-labs/rust-project-inspector/pull/94)).
+- `cargo metadata` and `cargo-audit` run from a directory outside the target so the target's cargo config and aliases cannot execute code ([#110](https://github.com/flipslidersand-labs/rust-project-inspector/pull/110)).
+- CI: `qa-workflows` reusable workflow, gitleaks, `cargo audit` and `cargo deny` jobs ([#49](https://github.com/flipslidersand-labs/rust-project-inspector/pull/49), [#57](https://github.com/flipslidersand-labs/rust-project-inspector/pull/57), [#55](https://github.com/flipslidersand-labs/rust-project-inspector/pull/55), [#61](https://github.com/flipslidersand-labs/rust-project-inspector/pull/61), [#122](https://github.com/flipslidersand-labs/rust-project-inspector/pull/122)).
+- README now documents all 10 inspections, every `rpi.toml` key, installation, `--audit` and `--baseline` ([#54](https://github.com/flipslidersand-labs/rust-project-inspector/pull/54)).
+
+### Fixed
+- `collect`: a deeply nested `.rs` file no longer overflows the stack of `syn` ([#116](https://github.com/flipslidersand-labs/rust-project-inspector/pull/116)); the walk no longer follows symlinks ([#79](https://github.com/flipslidersand-labs/rust-project-inspector/pull/79)); `target`-named directories deeper than the workspace's own are no longer skipped ([#108](https://github.com/flipslidersand-labs/rust-project-inspector/pull/108)); a sub-directory without `Cargo.toml` uses the nearest manifest ([#113](https://github.com/flipslidersand-labs/rust-project-inspector/pull/113)); a root package no longer re-reads other members' files ([#86](https://github.com/flipslidersand-labs/rust-project-inspector/pull/86)).
+- `collect`: dev/build dependencies are excluded from `workspace_deps`, so dev-dependency cycles are no longer reported as cycles ([#78](https://github.com/flipslidersand-labs/rust-project-inspector/pull/78)); non-ASCII paths no longer drop out of churn because of `quotepath` ([#80](https://github.com/flipslidersand-labs/rust-project-inspector/pull/80)); invalid `cargo audit` JSON or a missing list now warns instead of silently reporting 0 ([#81](https://github.com/flipslidersand-labs/rust-project-inspector/pull/81)).
+- `dep-hygiene`: renamed dependencies are no longer reported as unused ([#84](https://github.com/flipslidersand-labs/rust-project-inspector/pull/84)).
+- `imports` (used by `coupling` and `dep-hygiene`): `extern crate` is counted as a root ([#95](https://github.com/flipslidersand-labs/rust-project-inspector/pull/95)); built-in attributes, one-segment paths, `extern crate` aliases and local `mod` names no longer count as external roots ([#107](https://github.com/flipslidersand-labs/rust-project-inspector/pull/107), [#109](https://github.com/flipslidersand-labs/rust-project-inspector/pull/109), [#114](https://github.com/flipslidersand-labs/rust-project-inspector/pull/114)).
+- `complexity` double counting, trend worsening judgement and other minor bugs ([#111](https://github.com/flipslidersand-labs/rust-project-inspector/pull/111)).
+
+Test-only PRs (acceptance tests, edge-case fixtures, per-inspection boundary tests; for example [#27](https://github.com/flipslidersand-labs/rust-project-inspector/pull/27), [#43](https://github.com/flipslidersand-labs/rust-project-inspector/pull/43), [#46](https://github.com/flipslidersand-labs/rust-project-inspector/pull/46), [#87](https://github.com/flipslidersand-labs/rust-project-inspector/pull/87), [#88](https://github.com/flipslidersand-labs/rust-project-inspector/pull/88), [#89](https://github.com/flipslidersand-labs/rust-project-inspector/pull/89), [#91](https://github.com/flipslidersand-labs/rust-project-inspector/pull/91)) are not itemised.

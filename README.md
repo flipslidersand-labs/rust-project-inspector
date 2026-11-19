@@ -93,6 +93,14 @@ churn_warn = 5              # git changes per file / ファイルの git 変更�
 churn_git_timeout_secs = 30 # max seconds for git log; churn-hotspot skipped on timeout / git log の最大実行秒数（超過時は churn-hotspot をスキップ）
 ```
 
+### Exit codes / 終了コード
+
+| Code | Meaning / 意味 |
+|------|----------------|
+| `0` | Success (no `--fail-on` hit) / 成功（`--fail-on` に該当なし） |
+| `1` | `--fail-on` threshold exceeded / `--fail-on` の閾値超過 |
+| `2` | Collection or other failure (e.g. path not found) / 収集失敗などの実行エラー（例: パスが存在しない） |
+
 ## CI Integration / CI 連携
 
 [`.github/workflows/inspect.yml`](.github/workflows/inspect.yml) uploads SARIF to GitHub Code Scanning.
@@ -128,6 +136,8 @@ See [`DESIGN.md`](DESIGN.md). 4-crate workspace: `rpi-core` / `rpi-collect` / `r
 Parses AST once with `syn` and shares it across all inspections — no nightly toolchain required.
 
 詳細は [`DESIGN.md`](DESIGN.md)。syn で AST を1回だけパースし全 inspection で共有。型解決が要る分析は近似（nightly 不要）。
+
+Changes are listed in [`CHANGELOG.md`](CHANGELOG.md). / 変更履歴は [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## Status / ステータス
 
