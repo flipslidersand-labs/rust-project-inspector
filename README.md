@@ -50,7 +50,7 @@ rpi inspect . --fail-on warn         # exit 1 on warn+ (CI gate) / warn 以上�
 rpi inspect . --fail-on error        # exit 1 on error only / error があるときだけ exit 1
 rpi inspect . --audit                # run cargo-audit, enable audit-bridge / cargo-audit を実行し audit-bridge を有効化
 rpi inspect . --baseline prior.json  # compare with a saved JSON report, print trend to stderr / 保存済み JSON と比較し trend を stderr に出力
-rpi inspect . --verbose              # per-inspection timing on stderr / 各 inspection の所要時間を stderr に出力
+rpi inspect . --verbose              # collect + per-inspection timing on stderr / collect と各 inspection の所要時間を stderr に出力
 ```
 
 `--audit` requires [`cargo-audit`](https://crates.io/crates/cargo-audit): `cargo install cargo-audit`. Without it, `audit-bridge` reports nothing (no error is raised).  
@@ -135,6 +135,8 @@ See [`DESIGN.md`](DESIGN.md). 4-crate workspace: `rpi-core` / `rpi-collect` / `r
 Parses AST once with `syn` and shares it across all inspections — no nightly toolchain required.
 
 詳細は [`DESIGN.md`](DESIGN.md)。syn で AST を1回だけパースし全 inspection で共有。型解決が要る分析は近似（nightly 不要）。
+
+Changes are listed in [`CHANGELOG.md`](CHANGELOG.md). / 変更履歴は [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## Status / ステータス
 
