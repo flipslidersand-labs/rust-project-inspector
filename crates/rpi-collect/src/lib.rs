@@ -94,13 +94,19 @@ fn collect_inner(root: &Path, opts: CollectOptions) -> Result<Context> {
             if dep.kind != cargo_metadata::DependencyKind::Normal {
                 continue;
             }
+            // The same dependency under several `[target.*.dependencies]`
+            // tables arrives as one edge per table; list it once (#133).
             if member_names.contains(&dep.name) {
-                workspace_deps.push(dep.name.clone());
+                if !workspace_deps.contains(&dep.name) {
+                    workspace_deps.push(dep.name.clone());
+                }
             } else {
                 // Code refers to a renamed dependency by its rename; keep the
                 // original package name separately for display (#66).
                 let reference = dep.rename.as_deref().unwrap_or(&dep.name);
-                external_deps.push(reference.to_string());
+                if !external_deps.iter().any(|d| d == reference) {
+                    external_deps.push(reference.to_string());
+                }
                 if reference != dep.name {
                     external_dep_packages.insert(reference.to_string(), dep.name.clone());
                 }
@@ -1172,6 +1178,34 @@ mod tests {
             krate.external_dep_packages.get("foo").map(String::as_str),
             Some("bar")
         );
+    }
+
+    /// #133: the same dependency under several `[target.*.dependencies]`
+    /// tables must be listed once.
+    #[test]
+    fn target_specific_duplicate_dependency_is_listed_once() {
+        let dir = scratch("target_dup_dep");
+        std::fs::create_dir_all(dir.join("bar/src")).unwrap();
+        std::fs::create_dir_all(dir.join("app/src")).unwrap();
+        std::fs::write(
+            dir.join("bar/Cargo.toml"),
+            "[package]\nname = \"bar\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("bar/src/lib.rs"), "pub fn b() {}\n").unwrap();
+        std::fs::write(
+            dir.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
+             [target.'cfg(unix)'.dependencies]\nbar = { path = \"../bar\" }\n\
+             [target.'cfg(windows)'.dependencies]\nbar = { path = \"../bar\" }\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("app/src/lib.rs"), "").unwrap();
+
+        let ctx = collect(&dir.join("app"), CollectOptions::default());
+        std::fs::remove_dir_all(&dir).ok();
+        let ctx = ctx.expect("collection must succeed");
+        assert_eq!(ctx.crates[0].external_deps, vec!["bar".to_string()]);
     }
 
     #[test]
