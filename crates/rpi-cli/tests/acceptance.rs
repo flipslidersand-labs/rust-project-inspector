@@ -445,6 +445,32 @@ fn run_inspect(extra: &[&str]) -> std::process::Output {
         .expect("rpi binary must be runnable")
 }
 
+/// #63: `--fail-on` の終了コード。fixture/multi は Warn を含み Error を含まない。
+#[test]
+fn fail_on_warn_exits_1_after_printing_report() {
+    let out = run_inspect(&["--format", "json", "--fail-on", "warn"]);
+    assert_eq!(out.status.code(), Some(1));
+    // exit する前にレポートが出ている(CI でも結果が読める)。
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .expect("report must be printed as JSON before exiting 1");
+    assert!(report["findings"].as_array().is_some_and(|f| !f.is_empty()));
+}
+
+#[test]
+fn fail_on_error_exits_0_when_only_warnings_exist() {
+    let out = run_inspect(&["--fail-on", "error"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(!out.stdout.is_empty(), "report must still be printed");
+}
+
+#[test]
+fn without_fail_on_exits_0_even_with_findings() {
+    let out = run_inspect(&["--format", "json"]);
+    assert_eq!(out.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(report["findings"].as_array().is_some_and(|f| !f.is_empty()));
+}
+
 #[test]
 fn verbose_prints_per_inspection_timing_to_stderr() {
     let out = run_inspect(&["--verbose"]);
@@ -459,6 +485,21 @@ fn verbose_prints_per_inspection_timing_to_stderr() {
     }
 }
 
+/// #25: collect (cargo metadata・パース・git log) の時間も出す。無いと
+/// タイムアウト原因が inspection 側にあるように見える。
+#[test]
+fn verbose_prints_collect_timing_first() {
+    let out = run_inspect(&["--verbose"]);
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let lines: Vec<&str> = stderr.lines().filter(|l| l.starts_with("[rpi] ")).collect();
+    let first = lines.first().expect("no timing lines");
+    assert!(
+        first.starts_with("[rpi] collect") && first.ends_with("ms"),
+        "collect timing must come first: {first}"
+    );
+}
+
 #[test]
 fn without_verbose_no_timing_and_stdout_unchanged() {
     let plain = run_inspect(&[]);
@@ -469,4 +510,37 @@ fn without_verbose_no_timing_and_stdout_unchanged() {
     assert!(!String::from_utf8_lossy(&json_verbose.stdout).contains("[rpi]"));
     serde_json::from_slice::<serde_json::Value>(&json_verbose.stdout)
         .expect("stdout must stay valid JSON with --verbose");
+}
+
+/// Run the real binary and return its exit code.
+fn exit_code(args: &[&std::ffi::OsStr]) -> Option<i32> {
+    std::process::Command::new(env!("CARGO_BIN_EXE_rpi"))
+        .arg("inspect")
+        .args(args)
+        .output()
+        .expect("rpi binary must be runnable")
+        .status
+        .code()
+}
+
+#[test]
+fn exit_code_is_0_on_success() {
+    assert_eq!(exit_code(&[fixture().as_os_str()]), Some(0));
+}
+
+#[test]
+fn exit_code_is_1_when_fail_on_threshold_is_exceeded() {
+    let f = fixture();
+    let args = [f.as_os_str(), "--fail-on".as_ref(), "warn".as_ref()];
+    assert_eq!(exit_code(&args), Some(1));
+}
+
+#[test]
+fn exit_code_is_2_when_collection_fails() {
+    let missing = std::env::temp_dir().join(format!("rpi_missing_{}", std::process::id()));
+    assert!(!missing.exists());
+    assert_eq!(exit_code(&[missing.as_os_str()]), Some(2));
+    // Also with --fail-on: a collection failure must not look like a threshold hit.
+    let args = [missing.as_os_str(), "--fail-on".as_ref(), "warn".as_ref()];
+    assert_eq!(exit_code(&args), Some(2));
 }
