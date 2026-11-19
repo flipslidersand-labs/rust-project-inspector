@@ -1273,21 +1273,6 @@ mod tests {
         assert!(churn.is_empty(), "non-git root must yield empty churn");
     }
 
-    #[test]
-    fn collect_churn_returns_empty_on_near_zero_timeout() {
-        // A 1ms timeout against a real git repo should either complete fast or
-        // time out — either way the function must return without panicking.
-        // We only assert no panic and that the result is a valid HashMap.
-        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../")
-            .canonicalize()
-            .unwrap();
-        let churn = collect_churn(&repo, Duration::from_millis(1));
-        // Result may or may not be empty depending on system speed; just verify
-        // the function terminates and the map is well-formed.
-        let _ = churn.len();
-    }
-
     /// Write an executable-free shell stub (run as `sh <script>`) into a fresh
     /// temp dir and return `(dir, command)`. Avoids ETXTBSY and PATH games.
     #[cfg(unix)]
@@ -1393,6 +1378,69 @@ mod tests {
             hit.map(|(_, n)| *n),
             Some(1),
             "non-ASCII path lost: {churn:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_churn_times_out_and_returns_empty_quickly() {
+        // The stub sleeps far longer than the 200ms limit: the timeout branch
+        // must kill it and return an empty map well before the sleep ends.
+        let (dir, cmd) = stub_git("timeout", "sleep 5\nprintf 'src/a.rs\n'\n");
+        let start = std::time::Instant::now();
+        let churn = collect_churn_with(cmd, &dir, Duration::from_millis(200));
+        let elapsed = start.elapsed();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(churn.is_empty(), "timed-out git must yield empty churn");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "timeout not enforced promptly: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn collect_churn_anchors_keys_at_git_toplevel_for_subdir_workspace() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return; // git unavailable: nothing to exercise
+        }
+        let repo = scratch("churn_anchor");
+        let ws = repo.join("crates/x");
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("src/lib.rs"), "fn a() {}\n").unwrap();
+        // Isolate from the host's git configuration.
+        let isolated = |cmd: &mut Command| {
+            cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1");
+        };
+        let git = |args: &[&str]| {
+            let mut cmd = Command::new("git");
+            isolated(&mut cmd);
+            let ok = cmd
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(["-c", "commit.gpgsign=false", "-C"])
+                .arg(&repo)
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            assert!(ok, "git {args:?} failed");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "crates/x/src/lib.rs"]);
+        git(&["commit", "-q", "-m", "init"]);
+
+        // The workspace root is the subdirectory, not the repo toplevel.
+        let mut cmd = Command::new("git");
+        isolated(&mut cmd);
+        let churn = collect_churn_with(cmd, &ws, Duration::from_secs(10));
+        // Canonicalize: TMPDIR may be a symlink.
+        let expected = ws.join("src/lib.rs").canonicalize().unwrap();
+        std::fs::remove_dir_all(&repo).ok();
+        assert_eq!(
+            churn.get(&expected).copied(),
+            Some(1),
+            "churn keys must match canonical file paths: {churn:?}"
         );
     }
 
