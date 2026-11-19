@@ -128,6 +128,8 @@ Parses AST once with `syn` and shares it across all inspections — no nightly t
 
 詳細は [`DESIGN.md`](DESIGN.md)。syn で AST を1回だけパースし全 inspection で共有。型解決が要る分析は近似（nightly 不要）。
 
+Changes are listed in [`CHANGELOG.md`](CHANGELOG.md). / 変更履歴は [`CHANGELOG.md`](CHANGELOG.md)。
+
 ## Status / ステータス
 
 All 10 inspections are implemented. Roadmap: [epic #1](https://github.com/flipslidersand/rust-project-inspector/issues/1).  
