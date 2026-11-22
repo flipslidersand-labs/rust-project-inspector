@@ -250,9 +250,22 @@ fn baseline_severity_counts(baseline: &serde_json::Value) -> Option<(usize, usiz
 /// 相対パス専用。RootDir/Prefix を含むと '//' になるため、strip_prefix 成功後の相対パスにだけ使う。
 fn path_to_uri(p: &Path) -> String {
     p.components()
-        .map(|c| c.as_os_str().to_string_lossy())
+        .map(|c| percent_encode(&c.as_os_str().to_string_lossy()))
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// RFC 3986 percent-encoding: everything except unreserved `A-Za-z0-9-._~` becomes `%XX` per UTF-8 byte.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 fn sarif_level(sev: Severity) -> &'static str {
@@ -656,6 +669,18 @@ mod tests {
         let p = PathBuf::from_iter(["crates", "k", "a.rs"]);
         assert_eq!(path_to_uri(&p), "crates/k/a.rs");
         assert_eq!(path_to_uri(Path::new("a.rs")), "a.rs");
+    }
+
+    #[test]
+    fn path_to_uri_percent_encodes_components() {
+        let p = PathBuf::from_iter(["a b", "c#d.rs"]);
+        assert_eq!(path_to_uri(&p), "a%20b/c%23d.rs");
+        assert_eq!(path_to_uri(Path::new("50%/q?.rs")), "50%25/q%3F.rs");
+        assert_eq!(
+            path_to_uri(Path::new("日本/é.rs")),
+            "%E6%97%A5%E6%9C%AC/%C3%A9.rs"
+        );
+        assert_eq!(path_to_uri(Path::new("A-z_0.~/x.rs")), "A-z_0.~/x.rs");
     }
 
     // `components()` drops a mid-path `.`, `display()` does not: pins the call site.
