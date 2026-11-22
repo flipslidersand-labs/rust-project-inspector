@@ -40,6 +40,7 @@ Merged PRs through #142 (2026-11-22) are listed; later PRs are added when they m
 
 ### Fixed
 - SARIF URIs are now relative to the git root, so workspaces in a subdirectory anchor correctly in Code Scanning ([#163](https://github.com/flipslidersand-labs/rust-project-inspector/pull/163)).
+- `pub-surface`: `pub fn` methods in inherent `impl` blocks now count toward the public item total (trait impls and `pub` fields are not counted) ([#162](https://github.com/flipslidersand-labs/rust-project-inspector/pull/162)).
 - SARIF: `artifactLocation.uri` is now percent-encoded per RFC 3986, so paths containing spaces, `#`, `%`, `?` or non-ASCII characters yield valid URIs ([#161](https://github.com/flipslidersand-labs/rust-project-inspector/pull/161)).
 - `collect`: the AST depth limit no longer counts `Block` nodes, so files with about 120 nested `{` or 127 chained unary operators are no longer skipped as "nesting too deep"; the limit is 144 ([#153](https://github.com/flipslidersand-labs/rust-project-inspector/pull/153)).
 - `collect`: the CLI now runs collection through output on one large-stack thread and the parsed AST is reused, so the second parse that ran on a normal stack is gone ([#151](https://github.com/flipslidersand-labs/rust-project-inspector/pull/151)).

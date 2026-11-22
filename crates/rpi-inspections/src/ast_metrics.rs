@@ -68,6 +68,19 @@ impl<'ast> Visit<'ast> for Counter {
         if i.unsafety.is_some() {
             self.stats.unsafe_count += 1;
         }
+        // Inherent impl `pub fn`s are API surface; trait impl methods are not.
+        if i.trait_.is_none() {
+            self.stats.pub_items += i
+                .items
+                .iter()
+                .filter(|it| {
+                    matches!(
+                        it,
+                        syn::ImplItem::Fn(f) if matches!(f.vis, syn::Visibility::Public(_))
+                    )
+                })
+                .count();
+        }
         visit::visit_item_impl(self, i);
     }
 
@@ -633,6 +646,37 @@ mod tests {
             "pub(crate) and pub(super) must not be counted as pub: {:?}",
             f[0].message
         );
+    }
+
+    fn pub_count(src: &str) -> String {
+        let cfg = Config {
+            pub_surface_warn: 0,
+            ..Default::default()
+        };
+        let f = PubSurface.run(&ctx_with(cfg, vec![krate_from_src("k", &[src])]));
+        assert_eq!(f.len(), 1, "{:?}", f);
+        f[0].message.clone()
+    }
+
+    #[test]
+    fn pub_surface_counts_inherent_impl_pub_methods() {
+        // struct (1) + 2 pub methods; private and pub(crate) methods excluded.
+        let src = "pub struct S; impl S { pub fn a() {} pub fn b(&self) {} fn c() {} pub(crate) fn d() {} }";
+        assert!(pub_count(src).starts_with("3 public items"));
+    }
+
+    #[test]
+    fn pub_surface_ignores_trait_impl_methods() {
+        // Trait impl methods carry no `pub`; the trait is the surface.
+        let src = "pub struct S; impl Default for S { fn default() -> Self { S } }";
+        assert!(pub_count(src).starts_with("1 public items"));
+    }
+
+    #[test]
+    fn pub_surface_counts_impl_methods_in_nested_mod() {
+        let src = "mod m { pub struct S; impl S { pub fn a() {} pub fn b() {} } }";
+        // `pub struct S` + 2 methods; `mod m` is private.
+        assert!(pub_count(src).starts_with("3 public items"));
     }
 
     #[test]
