@@ -59,15 +59,36 @@ fn report_value(report: &Report) -> Result<serde_json::Value> {
     Ok(v)
 }
 
-/// Replace `<root>/` in a message with nothing so absolute workspace paths do
-/// not leak (#169). No inspection embeds paths today; this is a safety net.
+/// Replace the workspace root in a message with `.` so absolute paths do not
+/// leak (#169). Only whole path prefixes match: the root must not be preceded
+/// by a path character and must be followed by '/', the end, or a non-path
+/// character. No inspection embeds paths today; this is a safety net.
 fn relativize_message(root: &Path, msg: &str) -> String {
     let r = root.display().to_string();
     let r = r.trim_end_matches('/');
     if r.is_empty() {
         return msg.to_string();
     }
-    msg.replace(&format!("{r}/"), "").replace(r, ".")
+    let is_path_char = |c: char| c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '~');
+    let mut out = String::with_capacity(msg.len());
+    let mut i = 0;
+    while i < msg.len() {
+        let rest = &msg[i..];
+        if let Some(after) = rest.strip_prefix(r) {
+            let before_ok = !msg[..i].chars().next_back().is_some_and(is_path_char);
+            let after_ok =
+                after.is_empty() || after.starts_with('/') || !after.starts_with(is_path_char);
+            if before_ok && after_ok {
+                out.push('.');
+                i += r.len();
+                continue;
+            }
+        }
+        let c = rest.chars().next().unwrap();
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
 }
 
 pub fn json(report: &Report) -> Result<String> {
@@ -555,6 +576,7 @@ mod tests {
         let mut f = finding("x", Severity::Warn, "k\u{1b}[31mcrate");
         f.message = "bad \u{1b}]0;title\u{7}\u{9b}x\nfake line".into();
         let mut r = report(vec![f]);
+        // The root line prints a fixed `.`, so the hostile root must not appear.
         r.workspace.root = PathBuf::from("/tmp/\u{1b}[2Jroot");
         let out = text(&r);
         assert!(!out.contains('\u{1b}'), "raw ESC leaked: {out:?}");
@@ -861,6 +883,21 @@ mod tests {
         let t = text(&r);
         assert!(!t.contains("/home/u"), "{t}");
         assert!(t.contains("root:     ."));
+    }
+
+    #[test]
+    fn relativize_message_respects_path_boundaries() {
+        let root = Path::new("/home/a");
+        assert_eq!(relativize_message(root, "/home/a"), ".");
+        assert_eq!(relativize_message(root, "/home/ab/x.rs"), "/home/ab/x.rs");
+        assert_eq!(
+            relativize_message(root, "/other/home/a/x"),
+            "/other/home/a/x"
+        );
+        assert_eq!(
+            relativize_message(root, "see /home/a/src/lib.rs"),
+            "see ./src/lib.rs"
+        );
     }
 
     #[test]
