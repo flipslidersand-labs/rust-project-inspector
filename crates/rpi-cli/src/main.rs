@@ -54,6 +54,11 @@ enum Command {
         /// Print each inspection's elapsed time to stderr.
         #[arg(long)]
         verbose: bool,
+
+        /// Add an aggregate summary: appended to text output, a `summary` key
+        /// in JSON, and stderr for SARIF. Off by default.
+        #[arg(long)]
+        summary: bool,
     },
 }
 
@@ -93,7 +98,8 @@ fn run() -> Result<()> {
             audit,
             baseline,
             verbose,
-        } => inspect(path, format, fail_on, audit, baseline, verbose),
+            summary,
+        } => inspect(path, format, fail_on, audit, baseline, verbose, summary),
     }
 }
 
@@ -104,6 +110,7 @@ fn inspect(
     audit: bool,
     baseline: Option<PathBuf>,
     verbose: bool,
+    summary: bool,
 ) -> Result<()> {
     let opts = rpi_collect::CollectOptions { run_audit: audit };
     let collect_start = Instant::now();
@@ -135,9 +142,22 @@ fn inspect(
     let report = Report::new(ctx.workspace, findings, now_rfc3339_ish());
 
     match format {
+        Format::Json if summary => println!("{}", render::json_with_summary(&report)?),
         Format::Json => println!("{}", render::json(&report)?),
         Format::Sarif => println!("{}", render::sarif(&report)?),
-        Format::Text => print!("{}", render::text(&report)),
+        Format::Text => {
+            print!("{}", render::text(&report));
+            if summary {
+                println!();
+                print!("{}", render::summary(&report));
+            }
+        }
+    }
+    // SARIF stdout must stay a pure document, so its summary goes to stderr.
+    if summary && matches!(format, Format::Sarif) {
+        for line in render::summary(&report).lines() {
+            eprintln!("{}", sanitize_for_terminal(line));
+        }
     }
 
     // Trend goes to stderr so it never pollutes machine-readable stdout.

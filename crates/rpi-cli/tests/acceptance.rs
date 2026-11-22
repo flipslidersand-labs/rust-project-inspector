@@ -512,6 +512,48 @@ fn without_verbose_no_timing_and_stdout_unchanged() {
         .expect("stdout must stay valid JSON with --verbose");
 }
 
+fn rpi_inspect(extra: &[&str]) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_rpi"))
+        .arg("inspect")
+        .arg(fixture())
+        .args(extra)
+        .output()
+        .expect("rpi binary must be runnable")
+}
+
+#[test]
+fn summary_flag_appends_summary_to_text_and_default_is_unchanged() {
+    let plain = String::from_utf8(rpi_inspect(&[]).stdout).unwrap();
+    let with = String::from_utf8(rpi_inspect(&["--summary"]).stdout).unwrap();
+    assert!(!plain.contains("=== Summary ==="));
+    assert!(with.starts_with(&plain), "summary must only append");
+    assert!(with.contains("=== Summary ==="));
+    assert!(with.contains("Total findings : "));
+    assert!(with.contains("Top inspections:"));
+    assert!(with.contains("Top crates at risk:"));
+}
+
+#[test]
+fn summary_flag_embeds_key_in_json_and_keeps_stdout_valid() {
+    let plain: serde_json::Value =
+        serde_json::from_slice(&rpi_inspect(&["--format", "json"]).stdout).unwrap();
+    assert!(plain.get("summary").is_none());
+    let v: serde_json::Value =
+        serde_json::from_slice(&rpi_inspect(&["--format", "json", "--summary"]).stdout).unwrap();
+    let s = &v["summary"];
+    let total = v["findings"].as_array().unwrap().len() as u64;
+    assert_eq!(s["total"].as_u64().unwrap(), total);
+    assert!(s["error"].is_u64() && s["warn"].is_u64() && s["info"].is_u64());
+    assert!(s["top_inspections"].is_array() && s["top_crates"].is_array());
+}
+
+#[test]
+fn summary_flag_goes_to_stderr_for_sarif() {
+    let out = rpi_inspect(&["--format", "sarif", "--summary"]);
+    serde_json::from_slice::<serde_json::Value>(&out.stdout).expect("sarif stdout stays JSON");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("=== Summary ==="));
+}
+
 /// Run the real binary and return its exit code.
 fn exit_code(args: &[&std::ffi::OsStr]) -> Option<i32> {
     std::process::Command::new(env!("CARGO_BIN_EXE_rpi"))

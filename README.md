@@ -51,6 +51,7 @@ rpi inspect . --fail-on error        # exit 1 on error only / error があると
 rpi inspect . --audit                # run cargo-audit, enable audit-bridge / cargo-audit を実行し audit-bridge を有効化
 rpi inspect . --baseline prior.json  # compare with a saved JSON report, print trend to stderr / 保存済み JSON と比較し trend を stderr に出力
 rpi inspect . --verbose              # collect + per-inspection timing on stderr / collect と各 inspection の所要時間を stderr に出力
+rpi inspect . --summary              # add severity counts and top inspections/crates (text: appended, json: `summary` key, sarif: stderr) / 件数・上位 inspection・リスク上位 crate の集計を追加(text は末尾、json は `summary` キー、sarif は stderr)
 ```
 
 `--audit` requires [`cargo-audit`](https://crates.io/crates/cargo-audit): `cargo install cargo-audit`. Without it, `audit-bridge` reports nothing (no error is raised).  
