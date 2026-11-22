@@ -194,6 +194,10 @@ fn collect_inner(
     let workspace = WorkspaceInfo {
         root: root_dir,
         crates: crates.iter().map(|c| c.name.clone()).collect(),
+        crate_manifests: crates
+            .iter()
+            .map(|c| (c.name.clone(), c.manifest_path.clone()))
+            .collect(),
     };
 
     Ok(Context {

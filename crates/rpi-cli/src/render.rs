@@ -184,7 +184,16 @@ pub fn sarif_in_repo(report: &Report, git_root: Option<&Path>) -> Result<String>
                     // Outside the workspace root: keep the path unchanged.
                     Err(_) => file.display().to_string(),
                 },
-                None => path_to_uri(&prefix.join("Cargo.toml")),
+                None => {
+                    // Crate-scoped: that crate's manifest, else the workspace's.
+                    let manifest = f
+                        .location
+                        .krate
+                        .as_ref()
+                        .and_then(|k| report.workspace.crate_manifests.get(k))
+                        .and_then(|m| m.strip_prefix(root).ok());
+                    path_to_uri(&prefix.join(manifest.unwrap_or(Path::new("Cargo.toml"))))
+                }
             };
             let line = f.location.span.map(|(s, _)| s).unwrap_or(1).max(1);
             result["locations"] = json!([{
@@ -638,6 +647,7 @@ mod tests {
             workspace: WorkspaceInfo {
                 root: PathBuf::from("/repo"),
                 crates: vec!["k".into()],
+                ..Default::default()
             },
             metrics: rpi_core::Metrics {
                 crate_count: 1,
@@ -739,6 +749,40 @@ mod tests {
         let uri = &v["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
             ["artifactLocation"]["uri"];
         assert_eq!(uri, "/elsewhere/x.rs");
+    }
+
+    #[test]
+    fn sarif_crate_finding_points_at_crate_manifest() {
+        use std::path::PathBuf;
+        let a = finding("workspace-graph", Severity::Warn, "a");
+        let b = finding("workspace-graph", Severity::Warn, "b");
+        let none = finding("workspace-graph", Severity::Warn, "unknown");
+        let mut r = report(vec![a, b, none]);
+        r.workspace.root = PathBuf::from("/repo/rust");
+        r.workspace.crate_manifests = [
+            ("a".to_string(), PathBuf::from("/repo/rust/a/Cargo.toml")),
+            ("b".to_string(), PathBuf::from("/repo/rust/b/Cargo.toml")),
+        ]
+        .into_iter()
+        .collect();
+        let uris = |g: Option<&Path>| -> Vec<String> {
+            let v: serde_json::Value =
+                serde_json::from_str(&sarif_in_repo(&r, g).unwrap()).unwrap();
+            (0..3)
+                .map(|i| {
+                    v["runs"][0]["results"][i]["locations"][0]["physicalLocation"]
+                        ["artifactLocation"]["uri"]
+                        .as_str()
+                        .unwrap()
+                        .to_string()
+                })
+                .collect()
+        };
+        assert_eq!(
+            uris(Some(Path::new("/repo"))),
+            ["rust/a/Cargo.toml", "rust/b/Cargo.toml", "rust/Cargo.toml"]
+        );
+        assert_eq!(uris(None), ["a/Cargo.toml", "b/Cargo.toml", "Cargo.toml"]);
     }
 
     #[test]
