@@ -77,7 +77,8 @@ enum FailLevel {
 }
 
 fn main() -> std::process::ExitCode {
-    match run() {
+    // Collection through output runs on one large-stack thread (#146).
+    match rpi_collect::run_on_big_stack(run) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             // Error text can embed untrusted paths/names; escape control chars.

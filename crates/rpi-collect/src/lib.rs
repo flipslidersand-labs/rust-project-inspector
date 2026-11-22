@@ -678,7 +678,7 @@ fn parse_file(path: &Path) -> Option<SourceFile> {
     }
 }
 
-/// Stack size of the dedicated parser thread. The stack is reserved lazily
+/// Stack size of the large-stack thread that runs collection (see [`run_on_big_stack`]). The stack is reserved lazily
 /// (virtual memory only), so this is not resident memory. 5000-level inputs of
 /// every shape tried (worst: debug-build generics, ~60 KiB/level) fit; 1 GiB covers ~15k levels. Group depth beyond MAX_GROUP_DEPTH is stopped by
 /// the lexical backstop below before it gets here.
@@ -709,6 +709,39 @@ fn spawn_with_fallback<T>(
         }
     }
     Err(last.unwrap_or_else(|| std::io::Error::other("no stack sizes to try")))
+}
+
+/// Run `f` on one thread with a large stack (falling back to smaller stacks,
+/// and finally to the calling thread with a warning if no thread can be
+/// created). Parsing happens on the thread that calls [`collect`], so the CLI
+/// runs collection through output inside this; the parse result is reused
+/// as-is, with no second parse. A panic in `f` is propagated.
+pub fn run_on_big_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    let slot = std::sync::Mutex::new(Some(f));
+    let take = || slot.lock().ok().and_then(|mut g| g.take());
+    let spawned = thread::scope(|scope| {
+        let handle = spawn_with_fallback(&PARSER_STACK_FALLBACKS, |size| {
+            thread::Builder::new()
+                .name("rpi-main".into())
+                .stack_size(size)
+                .spawn_scoped(scope, || take().map(|f| f()))
+        });
+        match handle {
+            Ok(h) => Some(h.join()),
+            Err(e) => {
+                safe_eprintln!(
+                    "warn: could not start a large-stack thread ({e}); running on the current stack"
+                );
+                None
+            }
+        }
+    });
+    match spawned {
+        Some(Ok(Some(v))) => v,
+        Some(Ok(None)) => unreachable!("closure is taken exactly once"),
+        Some(Err(payload)) => std::panic::resume_unwind(payload),
+        None => take().expect("closure not consumed when no thread started")(),
+    }
 }
 
 /// Backstop for bracket nesting (macro token groups are not bounded by
@@ -840,60 +873,6 @@ impl<'ast> syn::visit::Visit<'ast> for AstDepth {
     }
 }
 
-/// Why the dedicated parser thread rejected a file (all `Send`).
-enum ParseFail {
-    Syntax {
-        line: usize,
-        col: usize,
-        msg: String,
-    },
-    TooDeep,
-}
-
-/// Parse `content` on a thread with a large stack and only report whether it
-/// is acceptable. The AST is dropped on that thread too (dropping a deep tree
-/// is recursive as well); the caller re-parses on its own thread, which is
-/// safe because only trees within [`MAX_AST_DEPTH`] get through. (Spans and
-/// `proc-macro2` values are not `Send`, so the tree cannot be handed back.)
-///
-/// A stack overflow cannot be caught; it aborts the process. The lexical
-/// backstop plus the large stack are what keep inputs away from that.
-fn check_on_big_stack(content: &str) -> Result<Result<(), ParseFail>, String> {
-    let handle = spawn_with_fallback(&PARSER_STACK_FALLBACKS, |size| {
-        let content = content.to_owned();
-        thread::Builder::new()
-            .name("rpi-parse".into())
-            .stack_size(size)
-            .spawn(move || parse_and_measure(&content))
-    })
-    .map_err(|e| format!("could not start parser thread: {e}"))?;
-    handle
-        .join()
-        .map_err(|_| "parser thread panicked".to_string())
-}
-
-fn parse_and_measure(content: &str) -> Result<(), ParseFail> {
-    match syn::parse_file(content) {
-        Err(e) => {
-            let start = e.span().start();
-            Err(ParseFail::Syntax {
-                line: start.line,
-                col: start.column + 1,
-                msg: e.to_string(),
-            })
-        }
-        Ok(ast) => {
-            let mut v = AstDepth::default();
-            syn::visit::Visit::visit_file(&mut v, &ast);
-            if v.max > MAX_AST_DEPTH {
-                Err(ParseFail::TooDeep)
-            } else {
-                Ok(())
-            }
-        }
-    }
-}
-
 /// Like [`parse_file`] but returns the warning text instead of printing it.
 ///
 /// The message always carries the file path; for syntax errors it also carries
@@ -906,20 +885,20 @@ fn try_parse_file(path: &Path) -> Result<SourceFile, String> {
         return Err(too_deep());
     }
     let loc = content.lines().count();
-    match check_on_big_stack(&content)
-        .map_err(|e| format!("warn: skipping {} ({e})", path.display()))?
-    {
-        Ok(()) => {}
-        Err(ParseFail::TooDeep) => return Err(too_deep()),
-        Err(ParseFail::Syntax { line, col, msg }) => {
-            return Err(format!(
-                "warn: skipping {}:{line}:{col} (parse error: {msg})",
-                path.display()
-            ));
-        }
+    let ast = syn::parse_file(&content).map_err(|e| {
+        let start = e.span().start();
+        format!(
+            "warn: skipping {}:{}:{} (parse error: {e})",
+            path.display(),
+            start.line,
+            start.column + 1
+        )
+    })?;
+    let mut depth = AstDepth::default();
+    syn::visit::Visit::visit_file(&mut depth, &ast);
+    if depth.max > MAX_AST_DEPTH {
+        return Err(too_deep());
     }
-    let ast = syn::parse_file(&content)
-        .map_err(|e| format!("warn: skipping {} (parse error: {e})", path.display()))?;
     Ok(SourceFile {
         path: path.to_path_buf(),
         loc,
@@ -1158,9 +1137,9 @@ mod tests {
         let dir = scratch("deep_nesting");
         let path = dir.join("deep.rs");
         std::fs::write(&path, nested_parens_source(5000)).unwrap();
-        let result = try_parse_file(&path);
+        let result = run_on_big_stack(|| try_parse_file(&path).map(|_| ()));
         std::fs::remove_dir_all(&dir).ok();
-        let msg = result.err().expect("deeply nested file must be skipped");
+        let msg = result.expect_err("deeply nested file must be skipped");
         assert!(msg.contains("deep.rs"), "{msg}");
         assert!(msg.contains("nesting too deep"), "{msg}");
     }
@@ -1215,7 +1194,9 @@ mod tests {
                 let path = dir.join(format!("{name}_{n}.rs"));
                 std::fs::write(&path, src).unwrap();
                 // Ok or Err are both fine; the process must simply survive.
-                let _ = try_parse_file(&path);
+                run_on_big_stack(|| {
+                    let _ = try_parse_file(&path);
+                });
             }
         }
         std::fs::remove_dir_all(&dir).ok();
