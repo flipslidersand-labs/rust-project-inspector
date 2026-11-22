@@ -226,14 +226,24 @@ fn now_rfc3339_ish() -> String {
 /// stdout. Paths and reasons are untrusted, so replies are sanitized (this also
 /// keeps each reply on a single line). Runs on the large-stack thread from `main`.
 fn parse_worker() -> Result<()> {
-    use std::io::{BufRead, Write};
+    use std::io::{BufRead, Read, Write};
     let mut input = std::io::stdin().lock();
     let mut out = std::io::stdout().lock();
     let mut buf = Vec::new();
+    // Longest accepted line: the path cap plus `\r\n`. Anything longer is a
+    // misbehaving parent; stop instead of buffering without bound.
+    let max_line = rpi_collect::MAX_WORKER_PATH_BYTES + 2;
     loop {
         buf.clear();
-        if input.read_until(b'\n', &mut buf)? == 0 {
+        if (&mut input)
+            .take(max_line as u64 + 1)
+            .read_until(b'\n', &mut buf)?
+            == 0
+        {
             return Ok(());
+        }
+        if buf.len() > max_line {
+            anyhow::bail!("input line longer than {max_line} bytes");
         }
         if buf.last() == Some(&b'\n') {
             buf.pop();

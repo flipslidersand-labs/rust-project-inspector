@@ -67,3 +67,21 @@ fn hidden_from_help() {
         .unwrap();
     assert!(!String::from_utf8_lossy(&out.stdout).contains("parse-worker"));
 }
+
+#[test]
+fn overlong_line_stops_the_worker() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rpi"))
+        .arg("parse-worker")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    // No newline: the worker must give up instead of buffering it all.
+    let _ = stdin.write_all(&vec![b'a'; 1024 * 1024]);
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+}

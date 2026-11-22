@@ -14,6 +14,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+mod worker;
+pub use worker::{ParseWorker, WorkerError, MAX_WORKER_PATH_BYTES};
+
 use anyhow::{Context as _, Result};
 use cargo_metadata::MetadataCommand;
 use rpi_core::{AuditVuln, Config, Context, CrateData, SourceFile, WorkspaceInfo};
@@ -40,11 +43,43 @@ pub struct CollectOptions {
 /// stderr (path, and line for syntax errors) so a single bad file never aborts
 /// the whole run.
 pub fn collect(root: &Path, opts: CollectOptions) -> Result<Context> {
-    collect_inner(root, opts)
+    collect_inner(root, opts, None)
         .with_context(|| format!("failed to inspect workspace at {}", root.display()))
 }
 
-fn collect_inner(root: &Path, opts: CollectOptions) -> Result<Context> {
+/// Like [`collect`], but every `.rs` file is first judged by a child
+/// `parse-worker` process, so input that makes `syn` abort (or hang) skips only
+/// that file with a warning instead of killing the caller. `worker_exe` must be
+/// an `rpi` binary (e.g. `std::env::current_exe()` from the CLI).
+pub fn collect_isolated(root: &Path, opts: CollectOptions, worker_exe: &Path) -> Result<Context> {
+    let mut worker = ParseWorker::new(worker_exe);
+    collect_inner(root, opts, Some(&mut worker))
+        .with_context(|| format!("failed to inspect workspace at {}", root.display()))
+}
+
+/// Parse `path`, asking the worker first when isolation is on.
+fn parse_file_via(worker: &mut Option<&mut ParseWorker>, path: &Path) -> Option<SourceFile> {
+    if let Some(w) = worker.as_deref_mut() {
+        match w.verdict(path) {
+            Ok(()) => {}
+            Err(WorkerError::Parse(msg)) => {
+                safe_eprintln!("{msg}");
+                return None;
+            }
+            Err(e) => {
+                safe_eprintln!("warn: skipping {} ({e})", path.display());
+                return None;
+            }
+        }
+    }
+    parse_file(path)
+}
+
+fn collect_inner(
+    root: &Path,
+    opts: CollectOptions,
+    mut worker: Option<&mut ParseWorker>,
+) -> Result<Context> {
     // Full metadata (deps resolved) so `dep-hygiene` can inspect the whole
     // graph for duplicate versions.
     //
@@ -111,7 +146,7 @@ fn collect_inner(root: &Path, opts: CollectOptions) -> Result<Context> {
 
         let files = collect_rs_files(&root_dir)
             .into_iter()
-            .filter_map(|path| parse_file(&path))
+            .filter_map(|path| parse_file_via(&mut worker, &path))
             .collect();
 
         crates.push(CrateData {
