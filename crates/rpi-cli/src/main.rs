@@ -109,6 +109,18 @@ fn run() -> Result<()> {
     }
 }
 
+/// Parse in a child process by default (`parse_isolation` in rpi.toml turns it
+/// off); fall back to in-process parsing if our own path is unknown.
+fn collect_context(
+    path: &std::path::Path,
+    opts: rpi_collect::CollectOptions,
+) -> Result<rpi_core::Context> {
+    match std::env::current_exe() {
+        Ok(exe) => rpi_collect::collect_isolated(path, opts, &exe),
+        Err(_) => rpi_collect::collect(path, opts),
+    }
+}
+
 fn inspect(
     path: PathBuf,
     format: Format,
@@ -120,7 +132,7 @@ fn inspect(
 ) -> Result<()> {
     let opts = rpi_collect::CollectOptions { run_audit: audit };
     let collect_start = Instant::now();
-    let ctx = rpi_collect::collect(&path, opts)?;
+    let ctx = collect_context(&path, opts)?;
     let collect_ms = collect_start.elapsed().as_millis();
 
     let inspections = rpi_inspections::all();

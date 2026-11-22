@@ -75,10 +75,22 @@ fn parse_file_via(worker: &mut Option<&mut ParseWorker>, path: &Path) -> Option<
     parse_file(path)
 }
 
+/// Apply `rpi.toml` to the worker: `parse_isolation = false` drops it and
+/// `parse_memory_limit_mb` (0 = none) caps the child's address space.
+fn configure_worker<'a>(
+    worker: Option<&'a mut ParseWorker>,
+    config: &Config,
+) -> Option<&'a mut ParseWorker> {
+    let w = worker.filter(|_| config.parse_isolation)?;
+    let mb = config.parse_memory_limit_mb;
+    w.set_memory_limit((mb > 0).then(|| mb.saturating_mul(1024 * 1024)));
+    Some(w)
+}
+
 fn collect_inner(
     root: &Path,
     opts: CollectOptions,
-    mut worker: Option<&mut ParseWorker>,
+    worker: Option<&mut ParseWorker>,
 ) -> Result<Context> {
     // Full metadata (deps resolved) so `dep-hygiene` can inspect the whole
     // graph for duplicate versions.
@@ -99,6 +111,9 @@ fn collect_inner(
         .find(|m| m.is_file())
         .unwrap_or_else(|| resolved.join("Cargo.toml"));
     let metadata = run_metadata(&manifest)?;
+    let root_dir = metadata.workspace_root.clone().into_std_path_buf();
+    let config = load_config(&root_dir);
+    let mut worker = configure_worker(worker, &config);
 
     // Names of workspace members, used to split intra- vs external deps.
     let member_names: BTreeSet<String> = metadata
@@ -166,8 +181,6 @@ fn collect_inner(
         .map(|p| (p.name.to_string(), p.version.to_string()))
         .collect();
 
-    let root_dir = metadata.workspace_root.clone().into_std_path_buf();
-    let config = load_config(&root_dir);
     let audit = if opts.run_audit {
         run_cargo_audit(&root_dir)
     } else {
@@ -1840,6 +1853,19 @@ mod tests {
     }
 
     #[test]
+    fn load_config_reads_isolation_keys() {
+        let d = Config::default();
+        assert!(d.parse_isolation);
+        assert_eq!(d.parse_memory_limit_mb, 4096);
+        let cfg = load_from(
+            "cfg_iso",
+            Some("parse_isolation = false\nparse_memory_limit_mb = 0\n"),
+        );
+        assert!(!cfg.parse_isolation);
+        assert_eq!(cfg.parse_memory_limit_mb, 0);
+    }
+
+    #[test]
     fn load_config_partial_keeps_other_keys_default() {
         let d = Config::default();
         let cfg = load_from("cfg_partial", Some("module_size_loc = 10\n"));
@@ -1880,7 +1906,10 @@ mod tests {
     fn parse_config_known_keys_produce_no_warning() {
         let text: String = Config::KNOWN_KEYS
             .iter()
-            .map(|k| format!("{k} = 1\n"))
+            .map(|k| match *k {
+                "parse_isolation" => format!("{k} = true\n"),
+                _ => format!("{k} = 1\n"),
+            })
             .collect();
         let (cfg, unknown) = parse_config(&text).unwrap();
         assert!(unknown.is_empty(), "{unknown:?}");
