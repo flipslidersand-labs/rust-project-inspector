@@ -1,5 +1,7 @@
 # rust-project-inspector (`rpi`)
 
+Release type: `library`
+
 > **Spot structural drift across your entire Rust workspace — one command, one view.**
 >
 > **crate をまたいだ構造の歪みを、1コマンドで1枚にする。**
