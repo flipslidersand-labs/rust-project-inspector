@@ -40,6 +40,7 @@ Merged PRs through #142 (2026-11-22) are listed; later PRs are added when they m
 - CI: `ci.yml` jobs are pinned to `runs-on: ubuntu-latest` (GitHub-hosted) instead of the `GATE_RUNNER` variable, because this repository is public ([#166](https://github.com/flipslidersand-labs/rust-project-inspector/pull/166)).
 
 ### Fixed
+- SARIF: crate-scoped findings without a file now point at that crate's `Cargo.toml` instead of the workspace `Cargo.toml` ([#167](https://github.com/flipslidersand-labs/rust-project-inspector/pull/167)).
 - `dep-hygiene`: a normal dependency referenced only from `tests/`, `examples/` or `benches/` is now reported as unused (it belongs in dev-dependencies) ([#164](https://github.com/flipslidersand-labs/rust-project-inspector/pull/164)).
 - SARIF URIs are now relative to the git root, so workspaces in a subdirectory anchor correctly in Code Scanning ([#163](https://github.com/flipslidersand-labs/rust-project-inspector/pull/163)).
 - `pub-surface`: `pub fn` methods in inherent `impl` blocks now count toward the public item total (trait impls and `pub` fields are not counted) ([#162](https://github.com/flipslidersand-labs/rust-project-inspector/pull/162)).

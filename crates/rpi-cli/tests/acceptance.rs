@@ -77,6 +77,7 @@ fn cyclic_context() -> rpi_core::Context {
         workspace: WorkspaceInfo {
             root: PathBuf::from("/w"),
             crates: vec!["alpha".to_string(), "beta".to_string()],
+            ..Default::default()
         },
         crates: vec![make("alpha", &["beta"]), make("beta", &["alpha"])],
         ..Default::default()
