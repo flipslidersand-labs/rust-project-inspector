@@ -50,7 +50,7 @@ rpi inspect . --fail-on warn         # exit 1 on warn+ (CI gate) / warn 以上�
 rpi inspect . --fail-on error        # exit 1 on error only / error があるときだけ exit 1
 rpi inspect . --audit                # run cargo-audit, enable audit-bridge / cargo-audit を実行し audit-bridge を有効化
 rpi inspect . --baseline prior.json  # compare with a saved JSON report, print trend to stderr / 保存済み JSON と比較し trend を stderr に出力
-rpi inspect . --verbose              # per-inspection timing on stderr / 各 inspection の所要時間を stderr に出力
+rpi inspect . --verbose              # collect + per-inspection timing on stderr / collect と各 inspection の所要時間を stderr に出力
 rpi inspect . --summary              # add severity counts and top inspections/crates (text: appended, json: `summary` key, sarif: stderr) / 件数・上位 inspection・リスク上位 crate の集計を追加(text は末尾、json は `summary` キー、sarif は stderr)
 ```
 
@@ -94,6 +94,14 @@ churn_warn = 5              # git changes per file / ファイルの git 変更�
 churn_git_timeout_secs = 30 # max seconds for git log; churn-hotspot skipped on timeout / git log の最大実行秒数（超過時は churn-hotspot をスキップ）
 ```
 
+### Exit codes / 終了コード
+
+| Code | Meaning / 意味 |
+|------|----------------|
+| `0` | Success (no `--fail-on` hit) / 成功（`--fail-on` に該当なし） |
+| `1` | `--fail-on` threshold exceeded / `--fail-on` の閾値超過 |
+| `2` | Collection or other failure (e.g. path not found) / 収集失敗などの実行エラー（例: パスが存在しない） |
+
 ## CI Integration / CI 連携
 
 [`.github/workflows/inspect.yml`](.github/workflows/inspect.yml) uploads SARIF to GitHub Code Scanning.
@@ -116,6 +124,7 @@ rpi inspect . --baseline prior.json         # compare / 比較
 `rpi inspect` は対象を静的に読む(ビルドスクリプトや対象のコードは実行しない)。`cargo metadata` と `--audit` の `cargo-audit` だけは外部コマンドとして動くため、次のとおり対象側の設定が実行に影響しないようにしている。
 
 - `cargo metadata` は対象外の作業ディレクトリ(unix では `/`。`/tmp` は他者が書けるため使わない)から `--manifest-path` で呼ぶ。対象の `.cargo/config.toml`(`build.rustc` 等)と `rust-toolchain.toml` は読まれない。
+- `cargo metadata` は `--frozen`(`Cargo.lock` を書き換えず、ネットワークにも出ない)で呼ぶ。`Cargo.lock` が無い・古い対象では失敗するため、stderr に警告して通常の呼び出しに戻し、終了後に対象の `Cargo.lock` を元の状態(無ければ削除)へ戻す。 / `cargo metadata` runs with `--frozen` (no lock writes, no network). If the target's `Cargo.lock` is missing or stale it warns on stderr, retries without it, and then restores the original `Cargo.lock` state.
 - `--audit` は `cargo audit` ではなく `cargo-audit` を直接、対象外の作業ディレクトリで `--file <対象>/Cargo.lock` 付きで呼ぶ。対象の `[alias]` で上書きされない。
 - `Cargo.lock` が無い対象の `--audit` はスキップする(cargo-audit に作らせない)。
 - 副作用: 対象側の `.cargo/audit.toml`(ignore 一覧)は読まれず、報告件数が増えることがある。対象側の `.cargo/config.toml` に依存する設定(ベンダリング、独自 registry など)は反映されず、`cargo metadata` が失敗することがある。
@@ -128,6 +137,8 @@ See [`DESIGN.md`](DESIGN.md). 4-crate workspace: `rpi-core` / `rpi-collect` / `r
 Parses AST once with `syn` and shares it across all inspections — no nightly toolchain required.
 
 詳細は [`DESIGN.md`](DESIGN.md)。syn で AST を1回だけパースし全 inspection で共有。型解決が要る分析は近似（nightly 不要）。
+
+Changes are listed in [`CHANGELOG.md`](CHANGELOG.md). / 変更履歴は [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## Status / ステータス
 

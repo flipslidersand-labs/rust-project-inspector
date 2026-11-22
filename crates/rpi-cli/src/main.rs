@@ -82,7 +82,8 @@ fn main() -> std::process::ExitCode {
         Err(e) => {
             // Error text can embed untrusted paths/names; escape control chars.
             eprintln!("Error: {}", sanitize_for_terminal(&format!("{e:?}")));
-            std::process::ExitCode::FAILURE
+            // 2 = tool failure; 1 is reserved for `--fail-on` threshold hits.
+            std::process::ExitCode::from(2)
         }
     }
 }
@@ -112,14 +113,21 @@ fn inspect(
     summary: bool,
 ) -> Result<()> {
     let opts = rpi_collect::CollectOptions { run_audit: audit };
+    let collect_start = Instant::now();
     let ctx = rpi_collect::collect(&path, opts)?;
+    let collect_ms = collect_start.elapsed().as_millis();
 
     let inspections = rpi_inspections::all();
     let width = inspections
         .iter()
         .map(|i| i.name().len())
+        .chain(std::iter::once("collect".len()))
         .max()
         .unwrap_or(0);
+    // collect (cargo metadata・パース・git log・audit) is usually the slow part.
+    if verbose {
+        eprintln!("[rpi] {:<width$}  {collect_ms}ms", "collect");
+    }
     let mut findings = Vec::new();
     for inspection in &inspections {
         let start = Instant::now();
