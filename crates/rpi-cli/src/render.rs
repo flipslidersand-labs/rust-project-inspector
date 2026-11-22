@@ -36,7 +36,59 @@ pub fn sarif_outside_root_count(report: &Report) -> usize {
 fn report_value(report: &Report) -> Result<serde_json::Value> {
     let mut v = serde_json::to_value(report)?;
     v["workspace"]["root"] = serde_json::Value::from(".");
+    let root = &report.workspace.root;
+    if let Some(items) = v["findings"].as_array_mut() {
+        for (item, f) in items.iter_mut().zip(&report.findings) {
+            // Inside the root: workspace-relative with '/'. Outside: absolute (#137).
+            if let Some(rel) = f
+                .location
+                .file
+                .as_ref()
+                .and_then(|p| p.strip_prefix(root).ok())
+            {
+                item["location"]["file"] = serde_json::Value::from(
+                    rel.components()
+                        .map(|c| c.as_os_str().to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join("/"),
+                );
+            }
+            item["message"] = serde_json::Value::from(relativize_message(root, &f.message));
+        }
+    }
     Ok(v)
+}
+
+/// Replace the workspace root in a message with `.` so absolute paths do not
+/// leak (#169). Only whole path prefixes match: the root must not be preceded
+/// by a path character and must be followed by '/', the end, or a non-path
+/// character. No inspection embeds paths today; this is a safety net.
+fn relativize_message(root: &Path, msg: &str) -> String {
+    let r = root.display().to_string();
+    let r = r.trim_end_matches('/');
+    if r.is_empty() {
+        return msg.to_string();
+    }
+    let is_path_char = |c: char| c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '~');
+    let mut out = String::with_capacity(msg.len());
+    let mut i = 0;
+    while i < msg.len() {
+        let rest = &msg[i..];
+        if let Some(after) = rest.strip_prefix(r) {
+            let before_ok = !msg[..i].chars().next_back().is_some_and(is_path_char);
+            let after_ok =
+                after.is_empty() || after.starts_with('/') || !after.starts_with(is_path_char);
+            if before_ok && after_ok {
+                out.push('.');
+                i += r.len();
+                continue;
+            }
+        }
+        let c = rest.chars().next().unwrap();
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
 }
 
 pub fn json(report: &Report) -> Result<String> {
@@ -351,13 +403,7 @@ pub fn text(report: &Report) -> String {
     let (e, w, i) = severity_counts(report);
 
     push(&mut out, "rust-project-inspector");
-    push(
-        &mut out,
-        &format!(
-            "  root:     {}",
-            sanitize_for_terminal(&report.workspace.root.display().to_string())
-        ),
-    );
+    push(&mut out, &format!("  root:     {}", "."));
     push(&mut out, &format!("  crates:   {}", m.crate_count));
     push(
         &mut out,
@@ -450,7 +496,7 @@ fn render_findings(out: &mut String, report: &Report) {
                     "    [{tag}] {} ({}): {}",
                     sanitize_for_terminal(f.inspection),
                     sanitize_for_terminal(scope),
-                    sanitize_for_terminal(&f.message)
+                    sanitize_for_terminal(&relativize_message(&report.workspace.root, &f.message))
                 ),
             );
         }
@@ -530,6 +576,7 @@ mod tests {
         let mut f = finding("x", Severity::Warn, "k\u{1b}[31mcrate");
         f.message = "bad \u{1b}]0;title\u{7}\u{9b}x\nfake line".into();
         let mut r = report(vec![f]);
+        // The root line prints a fixed `.`, so the hostile root must not appear.
         r.workspace.root = PathBuf::from("/tmp/\u{1b}[2Jroot");
         let out = text(&r);
         assert!(!out.contains('\u{1b}'), "raw ESC leaked: {out:?}");
@@ -815,6 +862,41 @@ mod tests {
         assert_eq!(
             r.workspace.root,
             PathBuf::from("/home/someuser/secret-proj")
+        );
+    }
+
+    #[test]
+    fn json_finding_file_is_relative_inside_root_absolute_outside() {
+        let mut inside = finding("x", Severity::Warn, "k");
+        inside.location.file = Some(PathBuf::from("/home/u/proj/crates/k/src/a.rs"));
+        inside.message = "see /home/u/proj/crates/k/src/a.rs".into();
+        let mut outside = finding("x", Severity::Warn, "k");
+        outside.location.file = Some(PathBuf::from("/elsewhere/b.rs"));
+        let mut r = report(vec![inside, outside]);
+        r.workspace.root = PathBuf::from("/home/u/proj");
+        for out in [json(&r).unwrap(), json_with_summary(&r).unwrap()] {
+            let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(v["findings"][0]["location"]["file"], "crates/k/src/a.rs");
+            assert_eq!(v["findings"][1]["location"]["file"], "/elsewhere/b.rs");
+            assert!(!out.contains("/home/u"), "{out}");
+        }
+        let t = text(&r);
+        assert!(!t.contains("/home/u"), "{t}");
+        assert!(t.contains("root:     ."));
+    }
+
+    #[test]
+    fn relativize_message_respects_path_boundaries() {
+        let root = Path::new("/home/a");
+        assert_eq!(relativize_message(root, "/home/a"), ".");
+        assert_eq!(relativize_message(root, "/home/ab/x.rs"), "/home/ab/x.rs");
+        assert_eq!(
+            relativize_message(root, "/other/home/a/x"),
+            "/other/home/a/x"
+        );
+        assert_eq!(
+            relativize_message(root, "see /home/a/src/lib.rs"),
+            "see ./src/lib.rs"
         );
     }
 

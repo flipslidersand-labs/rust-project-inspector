@@ -24,6 +24,7 @@ Merged PRs through #142 (2026-11-22) are listed; later PRs are added when they m
 - `rpi inspect` now parses each file in a child process by default (`parse_isolation`), with an address-space limit on the child (`parse_memory_limit_mb`, default 4096 MiB, unix only). Both are `rpi.toml` keys; isolated mode skips non-UTF-8 paths with a warning ([#155](https://github.com/flipslidersand-labs/rust-project-inspector/pull/155), part of #119).
 
 ### Changed
+- JSON `findings[].location.file` and the text `root:` line no longer show absolute workspace paths (files outside the root stay absolute) ([#170](https://github.com/flipslidersand-labs/rust-project-inspector/pull/170)).
 - Clearer error messages when an external tool is missing and on invalid input or parse failures ([#42](https://github.com/flipslidersand-labs/rust-project-inspector/pull/42), [#44](https://github.com/flipslidersand-labs/rust-project-inspector/pull/44)).
 - Trend: a malformed baseline now warns instead of counting as 0 findings, and a worse severity mix counts as a regression even when the total is unchanged ([#59](https://github.com/flipslidersand-labs/rust-project-inspector/pull/59), [#60](https://github.com/flipslidersand-labs/rust-project-inspector/pull/60)).
 - SARIF results without a file now carry a location ([#58](https://github.com/flipslidersand-labs/rust-project-inspector/pull/58)); `artifactLocation.uri` is normalised to `/` separators ([#106](https://github.com/flipslidersand-labs/rust-project-inspector/pull/106)).
