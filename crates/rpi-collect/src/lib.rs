@@ -309,12 +309,104 @@ fn collect_churn_with(mut git: Command, root: &Path, timeout: Duration) -> HashM
 
 /// Absolute path of the git repository root containing `dir`, if any.
 fn git_toplevel(dir: &Path) -> Option<PathBuf> {
-    let out = Command::new("git")
-        .args(["-C"])
+    git_toplevel_with(
+        Command::new("git"),
+        dir,
+        GIT_REV_PARSE_TIMEOUT,
+        GIT_REV_PARSE_MAX_OUTPUT,
+    )
+}
+
+const GIT_REV_PARSE_TIMEOUT: Duration = Duration::from_secs(10);
+const GIT_REV_PARSE_MAX_OUTPUT: usize = 1024 * 1024;
+
+/// Why [`run_limited`] gave up on a command.
+#[derive(Debug)]
+enum LimitedError {
+    Spawn(std::io::Error),
+    Timeout,
+    TooLarge,
+}
+
+/// Captured result of [`run_limited`].
+#[derive(Debug)]
+struct Limited {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// Run `cmd` with a wall-clock `timeout` and a `max` byte cap on stdout. On
+/// timeout or stdout overflow the child is killed. stderr is kept up to `max`
+/// bytes and the rest is drained and discarded (it never fails the run).
+fn run_limited(mut cmd: Command, timeout: Duration, max: usize) -> Result<Limited, LimitedError> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(LimitedError::Spawn)?;
+    let mut out = child.stdout.take().expect("stdout was piped");
+    let mut err = child.stderr.take().expect("stderr was piped");
+    let deadline = std::time::Instant::now() + timeout;
+
+    // (bytes, overflowed)
+    let (otx, orx) = mpsc::channel::<(Vec<u8>, bool)>();
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = (&mut out).take(max as u64 + 1).read_to_end(&mut buf);
+        let over = buf.len() > max;
+        let _ = otx.send((buf, over));
+    });
+    let (etx, erx) = mpsc::channel::<Vec<u8>>();
+    thread::spawn(move || {
+        let mut keep = Vec::new();
+        let _ = (&mut err).take(max as u64).read_to_end(&mut keep);
+        let _ = std::io::copy(&mut err, &mut std::io::sink());
+        let _ = etx.send(keep);
+    });
+
+    let fail = |child: &mut std::process::Child, e: LimitedError| {
+        let _ = child.kill();
+        let _ = child.wait();
+        Err(e)
+    };
+    let left = |d: std::time::Instant| d.saturating_duration_since(std::time::Instant::now());
+    let (stdout, over) = match orx.recv_timeout(left(deadline)) {
+        Ok(v) => v,
+        Err(_) => return fail(&mut child, LimitedError::Timeout),
+    };
+    if over {
+        return fail(&mut child, LimitedError::TooLarge);
+    }
+    // stdout closed; the process should exit promptly.
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            _ => return fail(&mut child, LimitedError::Timeout),
+        }
+    };
+    let stderr = erx.recv_timeout(left(deadline)).unwrap_or_default();
+    Ok(Limited {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn git_toplevel_with(
+    mut git: Command,
+    dir: &Path,
+    timeout: Duration,
+    max: usize,
+) -> Option<PathBuf> {
+    git.args(["-C"])
         .arg(dir)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
+        .args(["rev-parse", "--show-toplevel"]);
+    let out = run_limited(git, timeout, max).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -373,12 +465,23 @@ fn run_cargo_audit_with(root: &Path, search: Option<&OsStr>) -> Vec<AuditVuln> {
     })
 }
 
+const AUDIT_TIMEOUT: Duration = Duration::from_secs(120);
+const AUDIT_MAX_OUTPUT: usize = 64 * 1024 * 1024;
+
 /// Run a prepared `cargo-audit` command and interpret its output. Non-empty
 /// stdout is parsed (cargo-audit exits 1 when it finds vulnerabilities, so the
 /// exit status is deliberately ignored). `Err` carries the `warn: ...` message
 /// to print; `Ok(vec![])` with nothing to report is a silent empty result.
-fn run_audit_command(mut cmd: Command) -> Result<Vec<AuditVuln>, String> {
-    match cmd.output() {
+fn run_audit_command(cmd: Command) -> Result<Vec<AuditVuln>, String> {
+    run_audit_command_with(cmd, AUDIT_TIMEOUT, AUDIT_MAX_OUTPUT)
+}
+
+fn run_audit_command_with(
+    cmd: Command,
+    timeout: Duration,
+    max: usize,
+) -> Result<Vec<AuditVuln>, String> {
+    match run_limited(cmd, timeout, max) {
         Ok(out) if !out.stdout.is_empty() => {
             parse_audit_json(&String::from_utf8_lossy(&out.stdout))
         }
@@ -392,8 +495,15 @@ fn run_audit_command(mut cmd: Command) -> Result<Vec<AuditVuln>, String> {
                 ))
             }
         }
-        Err(e) => Err(format!(
+        Err(LimitedError::Spawn(e)) => Err(format!(
             "warn: `cargo audit` failed to run ({e}); skipping audit-bridge"
+        )),
+        Err(LimitedError::Timeout) => Err(format!(
+            "warn: `cargo audit` timed out after {}s; skipping audit-bridge",
+            timeout.as_secs()
+        )),
+        Err(LimitedError::TooLarge) => Err(format!(
+            "warn: `cargo audit` output exceeded {max} bytes; skipping audit-bridge"
         )),
     }
 }
@@ -1862,6 +1972,71 @@ mod tests {
         let r = run_audit_command(cmd);
         let _ = fs::remove_dir_all(&dir);
         assert!(r.unwrap_err().contains("not valid JSON"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_command_times_out_quickly() {
+        let (dir, cmd) = audit_stub("sleep", "sleep 5\n");
+        let start = std::time::Instant::now();
+        let r = run_audit_command_with(cmd, Duration::from_millis(200), 1024);
+        let elapsed = start.elapsed();
+        let _ = fs::remove_dir_all(&dir);
+        let w = r.unwrap_err();
+        assert!(w.contains("timed out"), "{w}");
+        assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_command_output_over_cap_is_err() {
+        let (dir, cmd) = audit_stub("big", "head -c 100000 /dev/zero | tr '\\0' 'a'\n");
+        let r = run_audit_command_with(cmd, Duration::from_secs(10), 1024);
+        let _ = fs::remove_dir_all(&dir);
+        let w = r.unwrap_err();
+        assert!(w.contains("exceeded"), "{w}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_limited_kills_endless_output() {
+        let (dir, cmd) = audit_stub("endless", "yes\n");
+        let start = std::time::Instant::now();
+        let r = run_limited(cmd, Duration::from_secs(10), 1024);
+        let elapsed = start.elapsed();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(matches!(r, Err(LimitedError::TooLarge)), "{r:?}");
+        assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_toplevel_times_out_to_none() {
+        let (dir, cmd) = audit_stub("gitsleep", "sleep 5\n");
+        let start = std::time::Instant::now();
+        let r = git_toplevel_with(cmd, &dir, Duration::from_millis(200), 1024);
+        let elapsed = start.elapsed();
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(r, None);
+        assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_toplevel_reads_stub_output() {
+        let (dir, cmd) = audit_stub("gitok", "echo /some/top\n");
+        let r = git_toplevel_with(cmd, &dir, Duration::from_secs(10), 1024);
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(r, Some(PathBuf::from("/some/top")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_toplevel_over_cap_is_none() {
+        let (dir, cmd) = audit_stub("gitbig", "head -c 100000 /dev/zero | tr '\\0' 'a'\n");
+        let r = git_toplevel_with(cmd, &dir, Duration::from_secs(10), 1024);
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(r, None);
     }
 
     /// Pinned current behavior: entries missing fields are kept as Findings
