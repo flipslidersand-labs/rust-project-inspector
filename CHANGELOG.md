@@ -37,6 +37,7 @@ Merged PRs through #142 (2026-11-22) are listed; later PRs are added when they m
 - `git log` for `churn-hotspot` now runs through the same limited runner with a 64 MiB stdout cap; on overflow churn is skipped with a warning ([#145](https://github.com/flipslidersand-labs/rust-project-inspector/pull/145)).
 - `DESIGN.md` brought in line with the implementation, and this `CHANGELOG.md` added ([#132](https://github.com/flipslidersand-labs/rust-project-inspector/pull/132)).
 - README now documents all 10 inspections, every `rpi.toml` key, installation, `--audit` and `--baseline` ([#54](https://github.com/flipslidersand-labs/rust-project-inspector/pull/54)).
+- CI: `ci.yml` jobs are pinned to `runs-on: ubuntu-latest` (GitHub-hosted) instead of the `GATE_RUNNER` variable, because this repository is public.
 
 ### Fixed
 - `dep-hygiene`: a normal dependency referenced only from `tests/`, `examples/` or `benches/` is now reported as unused (it belongs in dev-dependencies) ([#164](https://github.com/flipslidersand-labs/rust-project-inspector/pull/164)).

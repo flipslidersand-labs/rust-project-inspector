@@ -17,8 +17,8 @@ jobs:
 
   audit:
     # RustSec advisory を検出したら fail（audit-check アクションは使わず公式 CLI を直接実行）。
-    # runner 選択は共通ワークフロー（rust-test.yml）と同じ vars.GATE_RUNNER → ubuntu-latest。
-    runs-on: ${{ vars.GATE_RUNNER || 'ubuntu-latest' }}
+    # public のため GitHub-hosted 固定（ADR-010 補足）。
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -35,8 +35,8 @@ jobs:
 
   deny:
     # ライセンス(許可リストは deny.toml)・yanked・不明 registry を検出したら fail。
-    # runner 選択は audit ジョブと同じ。cargo-deny は公式 CLI を直接実行する。
-    runs-on: ${{ vars.GATE_RUNNER || 'ubuntu-latest' }}
+    # public のため GitHub-hosted 固定（ADR-010 補足）。cargo-deny は公式 CLI を直接実行する。
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
