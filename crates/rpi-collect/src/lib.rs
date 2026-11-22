@@ -340,7 +340,7 @@ fn collect_churn_with(
 }
 
 /// Absolute path of the git repository root containing `dir`, if any.
-fn git_toplevel(dir: &Path) -> Option<PathBuf> {
+pub fn git_toplevel(dir: &Path) -> Option<PathBuf> {
     git_toplevel_with(
         Command::new("git"),
         dir,

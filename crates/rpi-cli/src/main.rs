@@ -162,7 +162,10 @@ fn inspect(
     match format {
         Format::Json if summary => println!("{}", render::json_with_summary(&report)?),
         Format::Json => println!("{}", render::json(&report)?),
-        Format::Sarif => println!("{}", render::sarif(&report)?),
+        Format::Sarif => {
+            let git_root = rpi_collect::git_toplevel(&report.workspace.root);
+            println!("{}", render::sarif_in_repo(&report, git_root.as_deref())?)
+        }
         Format::Text => {
             print!("{}", render::text(&report));
             if summary {
