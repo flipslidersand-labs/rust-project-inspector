@@ -750,8 +750,11 @@ pub fn run_on_big_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
 const MAX_GROUP_DEPTH: usize = 512;
 
 /// The AST we hand to the inspections is walked recursively on ordinary
-/// stacks, so reject trees deeper than this (`syn`'s own parse limit is 128).
-const MAX_AST_DEPTH: usize = 128;
+/// stacks, so reject trees deeper than this. `syn`'s own parse limit is 128
+/// nested expressions; the margin covers the wrapping item/type/pattern nodes so
+/// a file `syn` accepts at its limit is not skipped. `Block` is not counted:
+/// every nested block already goes through an `Expr` (or an `Item`).
+const MAX_AST_DEPTH: usize = 144;
 
 /// Greatest `(`/`[`/`{` depth, skipping comments, string/char/raw-string
 /// literals and lifetimes.
@@ -845,7 +848,7 @@ fn max_group_depth(src: &str) -> usize {
     max
 }
 
-/// Tracks the deepest expression/type/pattern/block/item nesting of an AST.
+/// Tracks the deepest expression/type/pattern/item nesting of an AST.
 #[derive(Default)]
 struct AstDepth {
     cur: usize,
@@ -868,7 +871,6 @@ impl<'ast> syn::visit::Visit<'ast> for AstDepth {
         visit_expr => visit_expr: syn::Expr,
         visit_type => visit_type: syn::Type,
         visit_pat => visit_pat: syn::Pat,
-        visit_block => visit_block: syn::Block,
         visit_item => visit_item: syn::Item,
     }
 }
@@ -1142,6 +1144,28 @@ mod tests {
         let msg = result.expect_err("deeply nested file must be skipped");
         assert!(msg.contains("deep.rs"), "{msg}");
         assert!(msg.contains("nesting too deep"), "{msg}");
+    }
+
+    #[test]
+    fn realistic_deep_shapes_are_not_skipped() {
+        let dir = scratch("effective_depth");
+        let cases = [
+            (
+                "blocks_120",
+                format!("fn f() {}1{}\n", "{".repeat(120), "}".repeat(120)),
+            ),
+            (
+                "unary_127",
+                format!("fn f() {{ let _ = {}1; }}\n", "-".repeat(127)),
+            ),
+        ];
+        for (name, src) in cases {
+            let path = dir.join(format!("{name}.rs"));
+            std::fs::write(&path, src).unwrap();
+            let r = run_on_big_stack(|| try_parse_file(&path).map(|_| ()));
+            assert!(r.is_ok(), "{name}: {:?}", r.err());
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
