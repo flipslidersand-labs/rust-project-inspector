@@ -62,6 +62,8 @@ struct Live {
 pub struct ParseWorker {
     exe: PathBuf,
     timeout: Duration,
+    /// `RLIMIT_AS` for the child in bytes (unix only; `None` = unlimited).
+    memory_limit: Option<u64>,
     live: Option<Live>,
 }
 
@@ -71,6 +73,7 @@ impl ParseWorker {
         Self {
             exe: exe.into(),
             timeout: DEFAULT_TIMEOUT,
+            memory_limit: None,
             live: None,
         }
     }
@@ -83,6 +86,14 @@ impl ParseWorker {
     /// Per-file reply timeout (default 30 s).
     pub fn set_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
+    }
+
+    /// Address-space limit (bytes) applied to children started after this call.
+    /// A child that exceeds it fails to allocate and aborts or exits, which the
+    /// parent reports as [`WorkerError::Crashed`] (the file is skipped). Only
+    /// effective on unix; ignored elsewhere.
+    pub fn set_memory_limit(&mut self, bytes: Option<u64>) {
+        self.memory_limit = bytes;
     }
 
     /// Ask the child whether `path` parses. After any error other than
@@ -130,13 +141,13 @@ impl ParseWorker {
     }
 
     fn spawn(&self) -> Result<Live, WorkerError> {
-        let mut child = Command::new(&self.exe)
-            .arg("parse-worker")
+        let mut cmd = Command::new(&self.exe);
+        cmd.arg("parse-worker")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| WorkerError::Spawn(e.to_string()))?;
+            .stderr(Stdio::null());
+        limit_memory(&mut cmd, self.memory_limit);
+        let mut child = cmd.spawn().map_err(|e| WorkerError::Spawn(e.to_string()))?;
         let stdin = child.stdin.take().expect("stdin was piped");
         let stdout = child.stdout.take().expect("stdout was piped");
         let (tx, replies) = mpsc::channel();
@@ -186,6 +197,33 @@ impl Drop for ParseWorker {
         self.discard();
     }
 }
+
+/// Apply `RLIMIT_AS` to the child between fork and exec.
+#[cfg(unix)]
+fn limit_memory(cmd: &mut Command, limit: Option<u64>) {
+    use std::os::unix::process::CommandExt as _;
+    let Some(bytes) = limit else { return };
+    let lim = libc::rlimit {
+        rlim_cur: bytes as libc::rlim_t,
+        rlim_max: bytes as libc::rlim_t,
+    };
+    // SAFETY: the closure runs in the forked child before exec and only calls
+    // `setrlimit`, which is async-signal-safe; it allocates nothing and touches
+    // no locks. `lim` is a plain value captured by copy.
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::setrlimit(libc::RLIMIT_AS, &lim) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+}
+
+/// No portable address-space limit off unix (#90 is not yet evaluated).
+#[cfg(not(unix))]
+fn limit_memory(_cmd: &mut Command, _limit: Option<u64>) {}
 
 /// Validate that `path` can be sent as one protocol line.
 fn check_path(path: &Path) -> Result<&str, WorkerError> {

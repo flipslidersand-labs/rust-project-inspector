@@ -61,21 +61,31 @@ fn attack_input_is_skipped_and_worker_restarts() {
 #[cfg(unix)]
 #[test]
 fn small_stack_child_still_cannot_take_down_parent() {
-    use std::os::unix::fs::PermissionsExt as _;
     let dir = tmp("smallstack");
-    // Cap address space so the 1 GiB / 256 MiB stack reservations fail and the
-    // worker falls back to a small stack.
-    let script = dir.join("rpi-small.sh");
-    std::fs::write(
-        &script,
-        format!("#!/bin/sh\nulimit -v 300000\nexec \"{}\" \"$@\"\n", rpi()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let mut w = ParseWorker::new(&script);
+    // Cap address space (via the worker's own limit, not an environment
+    // `ulimit`) so the 1 GiB / 256 MiB stack reservations fail and the worker
+    // falls back to a small stack.
+    let mut w = ParseWorker::new(rpi());
+    w.set_memory_limit(Some(300 * 1024 * 1024));
     let r = w.verdict(&attack(&dir));
     assert!(r.is_err(), "{r:?}");
     assert!(w.verdict(&good(&dir)).is_ok(), "worker must restart");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn tiny_memory_limit_skips_file_instead_of_aborting_parent() {
+    let dir = tmp("tinymem");
+    let mut w = ParseWorker::new(rpi());
+    w.set_memory_limit(Some(8 * 1024 * 1024)); // too small for the child to run
+    let r = w.verdict(&good(&dir));
+    assert!(
+        matches!(r, Err(WorkerError::Crashed(_) | WorkerError::BadReply(_))),
+        "{r:?}"
+    );
+    w.set_memory_limit(None);
+    assert!(w.verdict(&good(&dir)).is_ok(), "unlimited child must work");
     std::fs::remove_dir_all(&dir).ok();
 }
 

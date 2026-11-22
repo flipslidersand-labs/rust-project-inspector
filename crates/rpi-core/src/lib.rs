@@ -149,6 +149,13 @@ pub struct Config {
     /// Maximum seconds to wait for `git log` before giving up and returning an
     /// empty churn map. Prevents hangs on repositories with very long histories.
     pub churn_git_timeout_secs: u64,
+    /// Judge each `.rs` file in a child `rpi parse-worker` process first, so
+    /// input that aborts the parser skips one file instead of the whole run
+    /// (#119). `false` parses in-process only.
+    pub parse_isolation: bool,
+    /// Address-space limit (MiB, `RLIMIT_AS`) for that child; `0` means no
+    /// limit. Unix only; other platforms run the child without a limit.
+    pub parse_memory_limit_mb: u64,
 }
 
 impl Config {
@@ -162,6 +169,8 @@ impl Config {
         "complexity_warn",
         "churn_warn",
         "churn_git_timeout_secs",
+        "parse_isolation",
+        "parse_memory_limit_mb",
     ];
 }
 
@@ -175,6 +184,8 @@ impl Default for Config {
             complexity_warn: 10,
             churn_warn: 5,
             churn_git_timeout_secs: 30,
+            parse_isolation: true,
+            parse_memory_limit_mb: 4096,
         }
     }
 }

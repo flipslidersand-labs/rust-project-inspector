@@ -83,6 +83,8 @@ Unknown keys (e.g. typos) are reported as a warning on stderr and ignored; known
 | `complexity_warn` | `10` | `complexity`, `churn-hotspot` | Function cyclomatic complexity above this is flagged; `churn-hotspot` also requires file total complexity above this / 関数の循環的複雑度がこれを超えると警告。`churn-hotspot` ではファイル合計複雑度にも適用 |
 | `churn_warn` | `5` | `churn-hotspot` | Git change count at or above this (and complexity above `complexity_warn`) is flagged / git 変更回数がこれ以上（かつ複雑度が `complexity_warn` 超）で警告 |
 | `churn_git_timeout_secs` | `30` | `churn-hotspot` | Max seconds for `git log`; `churn-hotspot` is skipped on timeout / `git log` の最大実行秒数（超過時は `churn-hotspot` をスキップ） |
+| `parse_isolation` | `true` | (collection) | Parse each `.rs` file in a child process first, so input that aborts the parser skips only that file with a warning / 各 `.rs` を先に子プロセスで判定し、パーサを異常終了させる入力ではそのファイルだけを警告付きでスキップ |
+| `parse_memory_limit_mb` | `4096` | (collection) | Address-space limit (`RLIMIT_AS`, MiB) of that child; `0` = no limit. Unix only; other platforms run the child without a limit / 子プロセスのアドレス空間上限(MiB)。`0` で無制限。unix のみ(他 OS は上限なし) |
 
 ```toml
 module_size_loc = 300       # LOC warning threshold / ファイル LOC 警告閾値
@@ -92,6 +94,8 @@ coupling_warn = 20          # imported crate roots per file / ファイルあた
 complexity_warn = 10        # cyclomatic complexity per function / 関数の循環的複雑度
 churn_warn = 5              # git changes per file / ファイルの git 変更回数
 churn_git_timeout_secs = 30 # max seconds for git log; churn-hotspot skipped on timeout / git log の最大実行秒数（超過時は churn-hotspot をスキップ）
+parse_isolation = true        # parse in a child process / 子プロセスでパース
+parse_memory_limit_mb = 4096  # child address-space limit in MiB, 0 = none (unix) / 子の上限(MiB)、0 で無制限(unix)
 ```
 
 ### Exit codes / 終了コード
@@ -129,6 +133,8 @@ rpi inspect . --baseline prior.json         # compare / 比較
 - `Cargo.lock` が無い対象の `--audit` はスキップする(cargo-audit に作らせない)。
 - `git rev-parse`(10 秒・出力 1 MiB)と `cargo-audit`(120 秒・出力 64 MiB)はタイムアウトと出力上限付きで呼ぶ。超過すると子プロセスを止め、`git rev-parse` はルートへフォールバックし、`cargo-audit` は stderr に警告して指摘なしで続行する。 / `git rev-parse` (10 s, 1 MiB) and `cargo-audit` (120 s, 64 MiB) run with a timeout and an output cap. On a breach the child is killed; `git rev-parse` falls back to the root and `cargo-audit` warns on stderr and continues with no findings.
 - 副作用: 対象側の `.cargo/audit.toml`(ignore 一覧)は読まれず、報告件数が増えることがある。対象側の `.cargo/config.toml` に依存する設定(ベンダリング、独自 registry など)は反映されず、`cargo metadata` が失敗することがある。
+- パースは既定で子プロセス(`rpi parse-worker`)に隔離される(`parse_isolation`)。`syn` を abort させる入力・無限ブロック(FIFO 等)・メモリ過大消費(unix: `parse_memory_limit_mb`、既定 4096 MiB のアドレス空間上限)は、そのファイルだけを警告付きでスキップする。非 unix ではメモリ上限はかからない(Windows 対応 #90 との関係は未確認)。 / Parsing runs in a child process by default; abort, hang or over-memory input skips only that file with a warning. The memory limit is unix-only.
+- 既知の制限: 子が「解析可能」と判定した後に親が同じファイルを再度パースするため、その間にファイルが差し替わると子の確認を経ていない内容を親が読む(TOCTOU)。隔離は競合する書き込み者に対する保証ではない。非 UTF-8 のパスは、隔離時は警告付きでスキップされる(`parse_isolation = false` の `collect` では解析される)。`rpi.toml` は検査対象側のファイルなので、対象が `parse_isolation = false` と書けば隔離は外れる。 / Known limits: a file swapped after the child approved it is parsed by the parent unchecked (TOCTOU); non-UTF-8 paths are skipped with a warning when isolated; `rpi.toml` comes from the target, which can switch isolation off.
 
 それでも信頼できない対象は、コンテナ等の隔離環境で実行すること。
 
