@@ -89,49 +89,44 @@ impl ParseWorker {
     /// [`WorkerError::Parse`] / [`WorkerError::PathRejected`] the child has been
     /// killed and reaped; the next call starts a new one.
     pub fn verdict(&mut self, path: &Path) -> Result<(), WorkerError> {
-        let p = path
-            .to_str()
-            .ok_or_else(|| WorkerError::PathRejected("not valid UTF-8".into()))?;
-        if p.contains(['\n', '\r']) {
-            return Err(WorkerError::PathRejected("contains a line break".into()));
-        }
-        if p.len() > MAX_WORKER_PATH_BYTES {
-            return Err(WorkerError::PathRejected(format!(
-                "longer than {MAX_WORKER_PATH_BYTES} bytes"
-            )));
-        }
+        let p = check_path(path)?;
         if self.live.is_none() {
             self.live = Some(self.spawn()?);
         }
-        let live = self.live.as_mut().expect("just ensured");
-        let sent = writeln!(live.stdin, "{p}").and_then(|()| live.stdin.flush());
-        let got = match sent {
-            // A failed write usually means the child is already gone; the
-            // closed reply channel below tells us how it ended.
-            Err(_) => live.replies.recv_timeout(self.timeout),
-            Ok(()) => live.replies.recv_timeout(self.timeout),
-        };
-        let line = match got {
-            Ok(l) => l,
+        let (line, sent) = self.exchange(p)?;
+        self.interpret(&line, sent)
+    }
+
+    /// Send one path line and wait for one reply line. Returns the reply and
+    /// whether the write succeeded. Timeout / closed pipe discard the child.
+    fn exchange(&mut self, p: &str) -> Result<(Vec<u8>, bool), WorkerError> {
+        let timeout = self.timeout;
+        let live = self.live.as_mut().expect("worker started by caller");
+        // A failed write usually means the child is already gone; the closed
+        // reply channel below tells us how it ended.
+        let sent = writeln!(live.stdin, "{p}")
+            .and_then(|()| live.stdin.flush())
+            .is_ok();
+        match live.replies.recv_timeout(timeout) {
+            Ok(l) => Ok((l, sent)),
             Err(RecvTimeoutError::Timeout) => {
                 self.discard();
-                return Err(WorkerError::Timeout);
+                Err(WorkerError::Timeout)
             }
-            Err(RecvTimeoutError::Disconnected) => {
-                let status = self.discard();
-                return Err(WorkerError::Crashed(status));
-            }
-        };
-        let text = String::from_utf8_lossy(&line).into_owned();
-        if text == "ok" && sent.is_ok() {
-            Ok(())
-        } else if let Some(reason) = text.strip_prefix("err ") {
-            Err(WorkerError::Parse(reason.to_string()))
-        } else {
-            self.discard();
-            let shown: String = text.chars().take(80).collect();
-            Err(WorkerError::BadReply(shown))
+            Err(RecvTimeoutError::Disconnected) => Err(WorkerError::Crashed(self.discard())),
         }
+    }
+
+    fn interpret(&mut self, line: &[u8], sent: bool) -> Result<(), WorkerError> {
+        let text = String::from_utf8_lossy(line).into_owned();
+        if text == "ok" && sent {
+            return Ok(());
+        }
+        if let Some(reason) = text.strip_prefix("err ") {
+            return Err(WorkerError::Parse(reason.to_string()));
+        }
+        self.discard();
+        Err(WorkerError::BadReply(text.chars().take(80).collect()))
     }
 
     fn spawn(&self) -> Result<Live, WorkerError> {
@@ -190,6 +185,22 @@ impl Drop for ParseWorker {
     fn drop(&mut self) {
         self.discard();
     }
+}
+
+/// Validate that `path` can be sent as one protocol line.
+fn check_path(path: &Path) -> Result<&str, WorkerError> {
+    let p = path
+        .to_str()
+        .ok_or_else(|| WorkerError::PathRejected("not valid UTF-8".into()))?;
+    if p.contains(['\n', '\r']) {
+        return Err(WorkerError::PathRejected("contains a line break".into()));
+    }
+    if p.len() > MAX_WORKER_PATH_BYTES {
+        return Err(WorkerError::PathRejected(format!(
+            "longer than {MAX_WORKER_PATH_BYTES} bytes"
+        )));
+    }
+    Ok(p)
 }
 
 fn describe(st: ExitStatus) -> String {
