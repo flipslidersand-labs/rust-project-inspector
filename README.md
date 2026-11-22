@@ -127,6 +127,7 @@ rpi inspect . --baseline prior.json         # compare / 比較
 - `cargo metadata` は `--frozen`(`Cargo.lock` を書き換えず、ネットワークにも出ない)で呼ぶ。`Cargo.lock` が無い・古い対象では失敗するため、stderr に警告して通常の呼び出しに戻し、終了後に対象の `Cargo.lock` を元の状態(無ければ削除)へ戻す。 / `cargo metadata` runs with `--frozen` (no lock writes, no network). If the target's `Cargo.lock` is missing or stale it warns on stderr, retries without it, and then restores the original `Cargo.lock` state.
 - `--audit` は `cargo audit` ではなく `cargo-audit` を直接、対象外の作業ディレクトリで `--file <対象>/Cargo.lock` 付きで呼ぶ。対象の `[alias]` で上書きされない。
 - `Cargo.lock` が無い対象の `--audit` はスキップする(cargo-audit に作らせない)。
+- `git rev-parse`(10 秒・出力 1 MiB)と `cargo-audit`(120 秒・出力 64 MiB)はタイムアウトと出力上限付きで呼ぶ。超過すると子プロセスを止め、`git rev-parse` はルートへフォールバックし、`cargo-audit` は stderr に警告して指摘なしで続行する。 / `git rev-parse` (10 s, 1 MiB) and `cargo-audit` (120 s, 64 MiB) run with a timeout and an output cap. On a breach the child is killed; `git rev-parse` falls back to the root and `cargo-audit` warns on stderr and continues with no findings.
 - 副作用: 対象側の `.cargo/audit.toml`(ignore 一覧)は読まれず、報告件数が増えることがある。対象側の `.cargo/config.toml` に依存する設定(ベンダリング、独自 registry など)は反映されず、`cargo metadata` が失敗することがある。
 
 それでも信頼できない対象は、コンテナ等の隔離環境で実行すること。
