@@ -24,6 +24,22 @@ fn normalize(name: &str) -> String {
     name.replace('-', "_")
 }
 
+/// True for files under the crate's `tests/`, `examples/` or `benches/`
+/// directory. Those targets can only use dev-dependencies, so a reference there
+/// must not count as use of a normal dependency (#156). Path-based: custom
+/// `[[test]] path = ...` targets are not recognised.
+fn is_test_target_file(krate: &rpi_core::CrateData, file: &rpi_core::SourceFile) -> bool {
+    file.path
+        .strip_prefix(&krate.root_dir)
+        .ok()
+        .and_then(|rel| rel.components().next())
+        .is_some_and(|c| {
+            ["tests", "examples", "benches"]
+                .iter()
+                .any(|d| c.as_os_str() == *d)
+        })
+}
+
 impl Inspection for DepHygiene {
     fn name(&self) -> &'static str {
         Self::NAME
@@ -35,7 +51,11 @@ impl Inspection for DepHygiene {
         // --- unused declared dependencies -----------------------------------
         for krate in &ctx.crates {
             let mut referenced: BTreeSet<String> = BTreeSet::new();
-            for file in &krate.files {
+            for file in krate
+                .files
+                .iter()
+                .filter(|f| !is_test_target_file(krate, f))
+            {
                 referenced.extend(file_reference_roots(&file.ast));
             }
             for dep in &krate.external_deps {
@@ -246,5 +266,35 @@ mod tests {
         let k = krate("k", &["bar"], "use foo as bar; fn f() {}");
         let f = DepHygiene.run(&ctx(vec![k], &[]));
         assert_eq!(f.len(), 1, "alias must not count as dep `bar`: {f:?}");
+    }
+
+    /// #156: a normal dep used only from tests/examples/benches is unused.
+    #[test]
+    fn normal_dep_used_only_in_test_targets_is_flagged() {
+        for dir in ["tests", "examples", "benches"] {
+            let mut k = krate("k", &["onlytest"], "pub fn a() {}");
+            k.files.push(SourceFile {
+                path: PathBuf::from(format!("/w/k/{dir}/t.rs")),
+                loc: 1,
+                ast: syn::parse_file("use onlytest::x;").unwrap(),
+            });
+            let f = DepHygiene.run(&ctx(vec![k], &[]));
+            assert_eq!(f.len(), 1, "{dir}: {f:?}");
+            assert!(f[0].message.contains("`onlytest`"));
+        }
+    }
+
+    /// #156: use under src/ (even a dir named `tests` below src) still counts.
+    #[test]
+    fn normal_dep_used_in_src_and_build_rs_counts() {
+        for rel in ["src/tests/t.rs", "build.rs", "src/main.rs"] {
+            let mut k = krate("k", &["d"], "pub fn a() {}");
+            k.files.push(SourceFile {
+                path: PathBuf::from(format!("/w/k/{rel}")),
+                loc: 1,
+                ast: syn::parse_file("use d::x;").unwrap(),
+            });
+            assert!(DepHygiene.run(&ctx(vec![k], &[])).is_empty(), "{rel}");
+        }
     }
 }
