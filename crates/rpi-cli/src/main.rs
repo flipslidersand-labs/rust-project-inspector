@@ -26,6 +26,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Internal: read one file path per line from stdin, answer `ok` or
+    /// `err <reason>` per line on stdout (parse verdict only).
+    #[command(name = "parse-worker", hide = true)]
+    ParseWorker,
     /// Inspect a Rust workspace and print a structural report.
     Inspect {
         /// Workspace root (defaults to the current directory).
@@ -92,6 +96,7 @@ fn main() -> std::process::ExitCode {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Command::ParseWorker => parse_worker(),
         Command::Inspect {
             path,
             format,
@@ -215,6 +220,37 @@ fn now_rfc3339_ish() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("unix:{secs}")
+}
+
+/// Hidden worker: one path per stdin line -> one `ok` / `err <reason>` line on
+/// stdout. Paths and reasons are untrusted, so replies are sanitized (this also
+/// keeps each reply on a single line). Runs on the large-stack thread from `main`.
+fn parse_worker() -> Result<()> {
+    use std::io::{BufRead, Write};
+    let mut input = std::io::stdin().lock();
+    let mut out = std::io::stdout().lock();
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        if input.read_until(b'\n', &mut buf)? == 0 {
+            return Ok(());
+        }
+        if buf.last() == Some(&b'\n') {
+            buf.pop();
+        }
+        if buf.last() == Some(&b'\r') {
+            buf.pop();
+        }
+        let reply = match String::from_utf8(buf.clone()) {
+            Ok(path) => match rpi_collect::parse_verdict(std::path::Path::new(&path)) {
+                Ok(()) => "ok".to_string(),
+                Err(msg) => format!("err {}", sanitize_for_terminal(&msg)),
+            },
+            Err(_) => "err path is not valid UTF-8".to_string(),
+        };
+        writeln!(out, "{reply}")?;
+        out.flush()?;
+    }
 }
 
 #[cfg(test)]
