@@ -31,6 +31,7 @@ Merged PRs through #142 (2026-11-22) are listed; later PRs are added when they m
 - Exit codes are split: a collection failure (for example a path that does not exist) now exits `2`; exceeding `--fail-on` stays `1` ([#139](https://github.com/flipslidersand-labs/rust-project-inspector/pull/139)).
 - `cargo metadata` runs with `--frozen`, so the target's `Cargo.lock` is not rewritten; if that fails it warns on stderr, retries without it, and restores the original lock state ([#141](https://github.com/flipslidersand-labs/rust-project-inspector/pull/141)).
 - `git rev-parse` (10 s, 1 MiB) and `cargo audit` (120 s, 64 MiB) now have a timeout and an output cap; on a breach the child process is killed and the run continues with a fallback or a warning ([#142](https://github.com/flipslidersand-labs/rust-project-inspector/pull/142)).
+- `git log` for `churn-hotspot` now runs through the same limited runner with a 64 MiB stdout cap; on overflow churn is skipped with a warning (this PR).
 - `DESIGN.md` brought in line with the implementation, and this `CHANGELOG.md` added ([#132](https://github.com/flipslidersand-labs/rust-project-inspector/pull/132)).
 - README now documents all 10 inspections, every `rpi.toml` key, installation, `--audit` and `--baseline` ([#54](https://github.com/flipslidersand-labs/rust-project-inspector/pull/54)).
 
