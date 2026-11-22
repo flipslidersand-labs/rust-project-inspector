@@ -5,7 +5,7 @@
 //! grouped by severity. `json` is the stable machine format.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use rpi_core::{is_hostile_char, sanitize_for_terminal, Report, Severity};
@@ -129,8 +129,34 @@ pub fn json_with_summary(report: &Report) -> Result<String> {
 /// results to the repository tree; crate-scoped findings without a file are
 /// anchored to the workspace `Cargo.toml` (GitHub Code Scanning rejects results
 /// that have no location).
+#[cfg(test)]
 pub fn sarif(report: &Report) -> Result<String> {
+    sarif_in_repo(report, None)
+}
+
+/// [`sarif`] with URIs anchored at the git repository root `git_root` (#157):
+/// Code Scanning resolves relative URIs against the repo root, so a workspace in
+/// a subdirectory needs its path prefix. `None`, or a root that is not an
+/// ancestor of the workspace, keeps workspace-root-relative URIs.
+pub fn sarif_in_repo(report: &Report, git_root: Option<&Path>) -> Result<String> {
     use serde_json::json;
+
+    let root = &report.workspace.root;
+    let prefix: PathBuf = git_root
+        .and_then(|g| {
+            root.strip_prefix(g)
+                .map(Path::to_path_buf)
+                .ok()
+                .or_else(|| {
+                    // git resolves symlinks; the workspace root may not.
+                    root.canonicalize()
+                        .ok()?
+                        .strip_prefix(g)
+                        .map(Path::to_path_buf)
+                        .ok()
+                })
+        })
+        .unwrap_or_default();
 
     // One rule per distinct inspection that produced a finding.
     let mut rule_ids: Vec<&str> = report.findings.iter().map(|f| f.inspection).collect();
@@ -141,7 +167,6 @@ pub fn sarif(report: &Report) -> Result<String> {
         .map(|id| json!({ "id": id, "name": id }))
         .collect();
 
-    let root = &report.workspace.root;
     let results: Vec<_> = report
         .findings
         .iter()
@@ -155,11 +180,11 @@ pub fn sarif(report: &Report) -> Result<String> {
             // workspace manifest for findings without a file.
             let uri = match &f.location.file {
                 Some(file) => match file.strip_prefix(root) {
-                    Ok(rel) => path_to_uri(rel),
+                    Ok(rel) => path_to_uri(&prefix.join(rel)),
                     // Outside the workspace root: keep the path unchanged.
                     Err(_) => file.display().to_string(),
                 },
-                None => "Cargo.toml".to_string(),
+                None => path_to_uri(&prefix.join("Cargo.toml")),
             };
             let line = f.location.span.map(|(s, _)| s).unwrap_or(1).max(1);
             result["locations"] = json!([{
@@ -714,6 +739,35 @@ mod tests {
         let uri = &v["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
             ["artifactLocation"]["uri"];
         assert_eq!(uri, "/elsewhere/x.rs");
+    }
+
+    #[test]
+    fn sarif_uri_is_git_root_relative_for_subdir_workspace() {
+        use std::path::PathBuf;
+        let mut f = finding("module-size", Severity::Warn, "a");
+        f.location.file = Some(PathBuf::from("/repo/rust/a/src/lib.rs"));
+        let g = finding("pub-surface", Severity::Info, "a");
+        let mut r = report(vec![f, g]);
+        r.workspace.root = PathBuf::from("/repo/rust");
+        let v: serde_json::Value =
+            serde_json::from_str(&sarif_in_repo(&r, Some(Path::new("/repo"))).unwrap()).unwrap();
+        let uri = |i: usize| {
+            v["runs"][0]["results"][i]["locations"][0]["physicalLocation"]["artifactLocation"]
+                ["uri"]
+                .clone()
+        };
+        assert_eq!(uri(0), "rust/a/src/lib.rs");
+        assert_eq!(uri(1), "rust/Cargo.toml");
+        // No git root, or an unrelated one: workspace-root-relative as before.
+        for g in [None, Some(Path::new("/other"))] {
+            let v: serde_json::Value =
+                serde_json::from_str(&sarif_in_repo(&r, g).unwrap()).unwrap();
+            assert_eq!(
+                v["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
+                    ["uri"],
+                "a/src/lib.rs"
+            );
+        }
     }
 
     #[test]
