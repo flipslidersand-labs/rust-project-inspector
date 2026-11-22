@@ -15,8 +15,34 @@ const W_ERROR: u64 = 100;
 const W_WARN: u64 = 10;
 const W_INFO: u64 = 1;
 
+/// Number of findings whose file lies outside the workspace root; SARIF emits
+/// those as absolute paths (#137), so the CLI warns about them.
+pub fn sarif_outside_root_count(report: &Report) -> usize {
+    let root = &report.workspace.root;
+    report
+        .findings
+        .iter()
+        .filter(|f| {
+            f.location
+                .file
+                .as_ref()
+                .is_some_and(|p| p.strip_prefix(root).is_err())
+        })
+        .count()
+}
+
+/// Serialize for JSON output with `workspace.root` replaced by `.` so the
+/// user's directory layout does not leak (#137). Collection keeps it absolute.
+fn report_value(report: &Report) -> Result<serde_json::Value> {
+    let mut v = serde_json::to_value(report)?;
+    v["workspace"]["root"] = serde_json::Value::from(".");
+    Ok(v)
+}
+
 pub fn json(report: &Report) -> Result<String> {
-    Ok(escape_json_hostile(serde_json::to_string_pretty(report)?))
+    Ok(escape_json_hostile(serde_json::to_string_pretty(
+        &report_value(report)?,
+    )?))
 }
 
 const SUMMARY_TOP_N: usize = 3;
@@ -108,7 +134,7 @@ pub fn summary(report: &Report) -> String {
 /// JSON report with a top-level `summary` object (`--summary --format json`).
 pub fn json_with_summary(report: &Report) -> Result<String> {
     let s = summarize(report);
-    let mut v = serde_json::to_value(report)?;
+    let mut v = report_value(report)?;
     v["summary"] = serde_json::json!({
         "total": s.total,
         "error": s.counts.0,
@@ -181,8 +207,8 @@ pub fn sarif_in_repo(report: &Report, git_root: Option<&Path>) -> Result<String>
             let uri = match &f.location.file {
                 Some(file) => match file.strip_prefix(root) {
                     Ok(rel) => path_to_uri(&prefix.join(rel)),
-                    // Outside the workspace root: keep the path unchanged.
-                    Err(_) => file.display().to_string(),
+                    // Outside the workspace root: keep it absolute (#137), encoded.
+                    Err(_) => path_to_abs_uri(file),
                 },
                 None => {
                     // Crate-scoped: that crate's manifest, else the workspace's.
@@ -287,6 +313,15 @@ fn path_to_uri(p: &Path) -> String {
         .map(|c| percent_encode(&c.as_os_str().to_string_lossy()))
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// Absolute path as a URI path: leading `/` kept, each component encoded.
+fn path_to_abs_uri(p: &Path) -> String {
+    let rest: PathBuf = p
+        .components()
+        .filter(|c| !matches!(c, std::path::Component::RootDir))
+        .collect();
+    format!("/{}", path_to_uri(&rest))
 }
 
 /// RFC 3986 percent-encoding: everything except unreserved `A-Za-z0-9-._~` becomes `%XX` per UTF-8 byte.
@@ -739,16 +774,61 @@ mod tests {
         assert_eq!(uri, "crates/k/src/deep/mod.rs");
     }
 
-    /// Pins CURRENT behavior only (#71 (1)): a file outside the workspace root
-    /// is emitted as the unchanged absolute path. Whether that is the intended
-    /// spec is a human decision; change this test if the spec changes.
-    /// Windows で `D:\other\x.rs` が来ると有効な URI にならない可能性。現状の Linux 前提の挙動を固定。
+    /// #137: a file outside the workspace root keeps its absolute path (leading
+    /// `/`), but every component is percent-encoded so the URI stays valid.
     #[test]
-    fn sarif_uri_outside_root_is_absolute_current_behavior() {
+    fn sarif_uri_outside_root_is_absolute_and_encoded() {
         let v = sarif_one(Some("/elsewhere/x.rs"), None);
         let uri = &v["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
             ["artifactLocation"]["uri"];
         assert_eq!(uri, "/elsewhere/x.rs");
+        let v = sarif_one(Some("/else where/a#b/50%.rs"), None);
+        let uri = &v["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
+            ["artifactLocation"]["uri"];
+        assert_eq!(uri, "/else%20where/a%23b/50%25.rs");
+    }
+
+    #[test]
+    fn outside_root_count_counts_only_files_outside_root() {
+        use std::path::PathBuf;
+        let mk = |p: &str| {
+            let mut f = finding("module-size", Severity::Warn, "k");
+            f.location.file = Some(PathBuf::from(p));
+            f
+        };
+        let mut r = report(vec![mk("/repo/a.rs"), mk("/x/b.rs"), mk("/y/c.rs")]);
+        r.workspace.root = PathBuf::from("/repo");
+        assert_eq!(sarif_outside_root_count(&r), 2);
+    }
+
+    #[test]
+    fn json_workspace_root_is_dot_and_hides_absolute_root() {
+        use std::path::PathBuf;
+        let mut r = report(vec![]);
+        r.workspace.root = PathBuf::from("/home/someuser/secret-proj");
+        for out in [json(&r).unwrap(), json_with_summary(&r).unwrap()] {
+            let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(v["workspace"]["root"], ".");
+            assert!(!out.contains("someuser"), "{out}");
+        }
+        // The in-memory report is untouched (collection stays absolute).
+        assert_eq!(
+            r.workspace.root,
+            PathBuf::from("/home/someuser/secret-proj")
+        );
+    }
+
+    #[test]
+    fn trend_reads_old_baseline_with_absolute_root() {
+        let r = report(vec![]);
+        let old = serde_json::json!({
+            "workspace": {"root": "/home/old/user/proj", "crates": []},
+            "findings": [],
+            "metrics": {"crate_count": 0, "finding_count": 0},
+        });
+        assert!(trend(&r, &old).is_ok());
+        let new: serde_json::Value = serde_json::from_str(&json(&r).unwrap()).unwrap();
+        assert!(trend(&r, &new).is_ok());
     }
 
     #[test]
