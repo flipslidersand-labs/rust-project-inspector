@@ -48,6 +48,10 @@ pub struct Finding {
 pub struct WorkspaceInfo {
     pub root: PathBuf,
     pub crates: Vec<String>,
+    /// Crate name -> its `Cargo.toml`, so renderers can anchor crate-scoped
+    /// findings to the crate manifest. Not part of the JSON output.
+    #[serde(skip)]
+    pub crate_manifests: std::collections::HashMap<String, PathBuf>,
 }
 
 /// Aggregate metrics rolled up across all findings.
@@ -277,6 +281,7 @@ mod tests {
         let ws = WorkspaceInfo {
             root: PathBuf::from("/tmp/x"),
             crates: vec!["a".into(), "b".into()],
+            ..Default::default()
         };
         let report = Report::new(ws, Vec::new(), "1970-01-01T00:00:00Z".into());
         assert_eq!(report.metrics.crate_count, 2);
