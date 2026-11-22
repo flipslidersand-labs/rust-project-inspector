@@ -909,6 +909,13 @@ fn try_parse_file(path: &Path) -> Result<SourceFile, String> {
     })
 }
 
+/// Parse verdict for one file, sharing [`try_parse_file`] (syntax, `MAX_GROUP_DEPTH`, `MAX_AST_DEPTH`)
+/// so the hidden parse worker never re-implements the decision. `Err` carries the
+/// unsanitized warning text; callers must sanitize before printing.
+pub fn parse_verdict(path: &Path) -> Result<(), String> {
+    try_parse_file(path).map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
