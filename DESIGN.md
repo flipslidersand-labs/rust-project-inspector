@@ -140,7 +140,8 @@ rpi inspect --verbose               # 各 inspection の所要時間を stderr �
 ※実装差: 当初案の `--format md` と `--only <inspection,...>` は実装していない。全 inspection を常に実行する。
 
 - **text**: 人間向けサマリ（crate ランキング表 + top findings）。
-- **sarif**: GitHub Code Scanning にそのまま食わせられる（既存 CI 資産と接続）。
+- **json**: `workspace.root` は出力時に `.` へ置換する（収集処理は絶対パスのまま。ユーザー名等の漏えい防止, #137）。`--baseline` は root を読まないので旧形式（絶対パス入り）の baseline もそのまま読める。
+- **sarif**: GitHub Code Scanning にそのまま食わせられる（既存 CI 資産と接続）。workspace root 外のファイルは絶対パスのまま（各 component を percent-encode）で出力し、該当件数を stderr に 1 回警告する（#137）。
 - **設定**: `rpi.toml` で閾値上書き（module-size 上限、unsafe 密度許容 等）。
 
 ---

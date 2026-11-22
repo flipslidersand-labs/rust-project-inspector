@@ -164,7 +164,16 @@ fn inspect(
         Format::Json => println!("{}", render::json(&report)?),
         Format::Sarif => {
             let git_root = rpi_collect::git_toplevel(&report.workspace.root);
-            println!("{}", render::sarif_in_repo(&report, git_root.as_deref())?)
+            println!("{}", render::sarif_in_repo(&report, git_root.as_deref())?);
+            let outside = render::sarif_outside_root_count(&report);
+            if outside > 0 {
+                eprintln!(
+                    "{}",
+                    sanitize_for_terminal(&format!(
+                        "warn: {outside} finding(s) are outside the workspace root; their SARIF URIs are absolute paths and may include your user name"
+                    ))
+                );
+            }
         }
         Format::Text => {
             print!("{}", render::text(&report));

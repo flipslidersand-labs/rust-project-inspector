@@ -118,6 +118,9 @@ Use `--fail-on warn` to gate PRs.
 Save a JSON report, then compare the next run against it. The regression / improvement summary goes to stderr, so JSON/SARIF on stdout stays clean.  
 JSON レポートを保存しておき、次回の実行と比較する。regression / improvement の要約は stderr に出るので、stdout の JSON/SARIF は汚れない。
 
+JSON `workspace.root` is always `.` (no absolute path in the output); SARIF URIs for files outside the workspace root stay absolute and trigger one stderr warning.  
+JSON の `workspace.root` は常に `.`(絶対パスを出さない)。workspace root 外のファイルの SARIF URI は絶対パスのままで、stderr に警告を 1 回出す。
+
 ```bash
 rpi inspect . --format json > prior.json    # save a baseline / ベースライン保存
 rpi inspect . --baseline prior.json         # compare / 比較
