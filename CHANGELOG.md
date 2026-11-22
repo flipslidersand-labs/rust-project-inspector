@@ -19,7 +19,7 @@ Merged PRs through #142 (2026-11-22) are listed; later PRs are added when they m
 - `--summary` adds severity counts and the top inspections and crates: appended to text output, a `summary` key in JSON, stderr for SARIF ([#130](https://github.com/flipslidersand-labs/rust-project-inspector/pull/130)).
 - Unknown `rpi.toml` keys are reported as a warning on stderr; known keys still apply ([#118](https://github.com/flipslidersand-labs/rust-project-inspector/pull/118)).
 - `CONTRIBUTING.md` ([#41](https://github.com/flipslidersand-labs/rust-project-inspector/pull/41)).
-- Internal: hidden `parse-worker` subcommand (stdin paths -> `ok`/`err <reason>`) for the planned parse-isolation worker; not user-facing, `collect` unchanged (#148, part of #119).
+- Internal: hidden `parse-worker` subcommand (stdin paths -> `ok`/`err <reason>`) for the planned parse-isolation worker; not user-facing, `collect` unchanged ([#152](https://github.com/flipslidersand-labs/rust-project-inspector/pull/152), part of #119).
 
 ### Changed
 - Clearer error messages when an external tool is missing and on invalid input or parse failures ([#42](https://github.com/flipslidersand-labs/rust-project-inspector/pull/42), [#44](https://github.com/flipslidersand-labs/rust-project-inspector/pull/44)).
