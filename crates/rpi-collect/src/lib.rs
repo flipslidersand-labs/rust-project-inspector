@@ -233,56 +233,40 @@ fn collect_churn(root: &Path, timeout: Duration) -> HashMap<PathBuf, usize> {
         safe_eprintln!("{notice}");
         return HashMap::new();
     }
-    collect_churn_with(Command::new("git"), root, timeout)
+    collect_churn_with(Command::new("git"), root, timeout, CHURN_MAX_OUTPUT)
 }
 
 /// [`collect_churn`] with the git invocation injected (`git` is the program and
 /// any leading arguments), so tests can substitute a stub.
-fn collect_churn_with(mut git: Command, root: &Path, timeout: Duration) -> HashMap<PathBuf, usize> {
+fn collect_churn_with(
+    mut git: Command,
+    root: &Path,
+    timeout: Duration,
+    max: usize,
+) -> HashMap<PathBuf, usize> {
     // core.quotepath=false: otherwise git C-quotes non-ASCII paths ("\346...")
     // and they would be dropped by the `.rs` filter below.
-    let mut child = match git
-        .args(["-c", "core.quotepath=false", "-C"])
+    git.args(["-c", "core.quotepath=false", "-C"])
         .arg(root)
-        .args(["log", "--name-only", "--pretty=format:"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return HashMap::new(),
-    };
-
-    // Read stdout in a background thread so the main thread can enforce a
-    // wall-clock timeout without blocking on the child's pipe.
-    let stdout = child.stdout.take().expect("stdout was piped");
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
-    thread::spawn(move || {
-        // Read raw bytes: git paths need not be UTF-8, and a decode error must
-        // not discard the whole history. Decode lossily afterwards.
-        let mut buf = Vec::new();
-        let _ = std::io::BufReader::new(stdout).read_to_end(&mut buf);
-        let _ = tx.send(buf);
-    });
-
-    let raw = match rx.recv_timeout(timeout) {
-        Ok(bytes) => {
-            // Reap the process and require success: a git that fails midway
-            // (e.g. a corrupt older object) leaves partial output that would
-            // silently undercount churn.
-            match child.wait() {
-                Ok(status) if status.success() => String::from_utf8_lossy(&bytes).into_owned(),
-                _ => return HashMap::new(),
-            }
-        }
-        Err(_) => {
-            // Timeout or thread panic: kill git and report.
-            let _ = child.kill();
-            let _ = child.wait();
+        .args(["log", "--name-only", "--pretty=format:"]);
+    // Raw bytes: git paths need not be UTF-8; decode lossily afterwards.
+    let raw = match run_limited(git, timeout, max) {
+        // Require success: a git that fails midway (e.g. a corrupt older
+        // object) leaves partial output that would silently undercount churn.
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
+        Ok(_) | Err(LimitedError::Spawn(_)) => return HashMap::new(),
+        Err(LimitedError::Timeout) => {
             safe_eprintln!(
                 "warn: `git log` timed out after {}s; churn-hotspot will be skipped \
                  (increase churn_git_timeout_secs in rpi.toml to raise the limit)",
                 timeout.as_secs()
+            );
+            return HashMap::new();
+        }
+        Err(LimitedError::TooLarge) => {
+            safe_eprintln!(
+                "warn: `git log` output exceeded {} MiB; churn-hotspot will be skipped",
+                max / (1024 * 1024)
             );
             return HashMap::new();
         }
@@ -316,6 +300,9 @@ fn git_toplevel(dir: &Path) -> Option<PathBuf> {
         GIT_REV_PARSE_MAX_OUTPUT,
     )
 }
+
+/// Upper bound on `git log` stdout for churn (full history can be large).
+const CHURN_MAX_OUTPUT: usize = 64 * 1024 * 1024;
 
 const GIT_REV_PARSE_TIMEOUT: Duration = Duration::from_secs(10);
 const GIT_REV_PARSE_MAX_OUTPUT: usize = 1024 * 1024;
@@ -1511,7 +1498,7 @@ mod tests {
     fn collect_churn_rejects_partial_output_from_failed_git() {
         // Emits a commit's paths, then fails (e.g. corrupt older object).
         let (dir, cmd) = stub_git("fail", "printf 'src/a.rs\nsrc/b.rs\n'\nexit 128\n");
-        let churn = collect_churn_with(cmd, &dir, Duration::from_secs(10));
+        let churn = collect_churn_with(cmd, &dir, Duration::from_secs(10), CHURN_MAX_OUTPUT);
         std::fs::remove_dir_all(&dir).ok();
         assert!(
             churn.is_empty(),
@@ -1523,7 +1510,7 @@ mod tests {
     #[test]
     fn collect_churn_accepts_successful_git_output() {
         let (dir, cmd) = stub_git("ok", "printf 'src/a.rs\n\nsrc/a.rs\nREADME.md\n'\n");
-        let churn = collect_churn_with(cmd, &dir, Duration::from_secs(10));
+        let churn = collect_churn_with(cmd, &dir, Duration::from_secs(10), CHURN_MAX_OUTPUT);
         std::fs::remove_dir_all(&dir).ok();
         assert_eq!(churn.len(), 1);
         assert_eq!(churn.values().copied().next(), Some(2));
@@ -1537,7 +1524,7 @@ mod tests {
             "nonutf8",
             "printf 'src/ok.rs\nsrc/bad\\377.rs\nsrc/ok.rs\n'\n",
         );
-        let churn = collect_churn_with(cmd, &dir, Duration::from_secs(10));
+        let churn = collect_churn_with(cmd, &dir, Duration::from_secs(10), CHURN_MAX_OUTPUT);
         std::fs::remove_dir_all(&dir).ok();
         let ok = churn.iter().find(|(p, _)| p.ends_with("src/ok.rs"));
         assert_eq!(ok.map(|(_, n)| *n), Some(2), "UTF-8 paths lost: {churn:?}");
@@ -1582,12 +1569,28 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn collect_churn_oversized_output_returns_empty_quickly() {
+        // Endless stdout: must be killed at the cap and yield no churn.
+        let (dir, cmd) = stub_git("big", "while :; do echo src/a.rs; done\n");
+        let start = std::time::Instant::now();
+        let churn = collect_churn_with(cmd, &dir, Duration::from_secs(10), 4096);
+        let elapsed = start.elapsed();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(churn.is_empty(), "oversized git output must yield no churn");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "cap not enforced: {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn collect_churn_times_out_and_returns_empty_quickly() {
         // The stub sleeps far longer than the 200ms limit: the timeout branch
         // must kill it and return an empty map well before the sleep ends.
         let (dir, cmd) = stub_git("timeout", "sleep 5\nprintf 'src/a.rs\n'\n");
         let start = std::time::Instant::now();
-        let churn = collect_churn_with(cmd, &dir, Duration::from_millis(200));
+        let churn = collect_churn_with(cmd, &dir, Duration::from_millis(200), CHURN_MAX_OUTPUT);
         let elapsed = start.elapsed();
         std::fs::remove_dir_all(&dir).ok();
         assert!(churn.is_empty(), "timed-out git must yield empty churn");
@@ -1632,7 +1635,7 @@ mod tests {
         // The workspace root is the subdirectory, not the repo toplevel.
         let mut cmd = Command::new("git");
         isolated(&mut cmd);
-        let churn = collect_churn_with(cmd, &ws, Duration::from_secs(10));
+        let churn = collect_churn_with(cmd, &ws, Duration::from_secs(10), CHURN_MAX_OUTPUT);
         // Canonicalize: TMPDIR may be a symlink.
         let expected = ws.join("src/lib.rs").canonicalize().unwrap();
         std::fs::remove_dir_all(&repo).ok();
