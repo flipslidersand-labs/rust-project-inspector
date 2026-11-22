@@ -20,6 +20,7 @@ Merged PRs through #142 (2026-11-22) are listed; later PRs are added when they m
 - Unknown `rpi.toml` keys are reported as a warning on stderr; known keys still apply ([#118](https://github.com/flipslidersand-labs/rust-project-inspector/pull/118)).
 - `CONTRIBUTING.md` ([#41](https://github.com/flipslidersand-labs/rust-project-inspector/pull/41)).
 - Internal: hidden `parse-worker` subcommand (stdin paths -> `ok`/`err <reason>`) for the planned parse-isolation worker; not user-facing, `collect` unchanged ([#152](https://github.com/flipslidersand-labs/rust-project-inspector/pull/152), part of #119).
+- Internal: `rpi_collect::ParseWorker` and `collect_isolated` run parsing in a child `parse-worker`; crashing, hanging or misbehaving input is skipped with a warning and the worker restarts. Not yet used by the CLI; the worker also caps its input line length ([#154](https://github.com/flipslidersand-labs/rust-project-inspector/pull/154), part of #119).
 
 ### Changed
 - Clearer error messages when an external tool is missing and on invalid input or parse failures ([#42](https://github.com/flipslidersand-labs/rust-project-inspector/pull/42), [#44](https://github.com/flipslidersand-labs/rust-project-inspector/pull/44)).
