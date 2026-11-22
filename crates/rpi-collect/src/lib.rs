@@ -686,9 +686,10 @@ const PARSER_STACK_BYTES: usize = 1024 * 1024 * 1024;
 
 /// Sizes tried in order when the thread cannot be created (e.g. `ulimit -v`
 /// makes the 1 GiB reservation fail with EAGAIN). Smaller stacks leave less
-/// headroom for bracket-free deep shapes (the known residual class); the
-/// group limit (512 levels, ~2 KiB/level) and AST limit (128) fit even in
-/// 16 MiB.
+/// headroom for bracket-free deep shapes (the known residual class, which can
+/// abort `syn` before any limit applies and is only fully safe at 1 GiB; see
+/// #119). The group limit (512 levels, ~2 KiB/level) fits even in 16 MiB; the
+/// AST limit (144) is not guaranteed there.
 const PARSER_STACK_FALLBACKS: [usize; 4] = [
     PARSER_STACK_BYTES,
     256 * 1024 * 1024,
