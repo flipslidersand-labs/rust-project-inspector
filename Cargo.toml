@@ -11,8 +11,8 @@ members = [
 version = "0.0.1"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/flipslidersand/rust-project-inspector"
-authors = ["dev-nodee"]
+repository = "https://github.com/flipslidersand-labs/rust-project-inspector"
+authors = ["flipslidersand-labs"]
 
 [workspace.dependencies]
 rpi-core = { path = "crates/rpi-core" }
