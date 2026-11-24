@@ -1,0 +1,126 @@
+name: Release
+
+# Prebuilt `rpi` binary for Linux x86_64.
+#  - tag (v*) push     : build -> checks -> attach to the Release. If there is no Release yet,
+#                        create a draft (a person publishes it).
+#  - workflow_dispatch : on a branch, upload an artifact only (verify without a tag). On a tag
+#                        (prepare-release.yml starts it after release-please creates the Release),
+#                        attach to the Release like a tag push.
+# Local builds are not distributed: a binary embeds build-environment paths (/home/<user>/...).
+# CI builds it, strips them with --remap-path-prefix, and fails if any remain.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions: {}
+
+# A tag can start this both by tag push and by workflow_dispatch: one run per ref.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  GLIBC_MAX: "2.35"  # ubuntu-22.04. A binary needing a newer glibc is not distributed
+
+jobs:
+  build:
+    # The glibc requirement follows the build OS: build on an older LTS to cover more systems.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      RUSTFLAGS: >-
+        --remap-path-prefix=${{ github.workspace }}=.
+        --remap-path-prefix=/home/runner=/home/user
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      # No build cache: a cache written by another workflow could poison the distributed binary
+      - name: Build CLI (release)
+        run: cargo build --release --locked -p rpi-cli
+      - name: Check the binary version matches the tag
+        # extra-files in release-please-config.json bumps the version; a missed entry shows here
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          got=$(./target/release/rpi --version)
+          echo "rpi --version: ${got} / tag: ${GITHUB_REF_NAME}"
+          [ "${got}" = "rpi ${GITHUB_REF_NAME#v}" ]
+      - name: Check the binary does not require a newer glibc than GLIBC_MAX
+        run: |
+          set -euo pipefail
+          max=$(objdump -T target/release/rpi | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "max glibc symbol required: ${max} (allowed: GLIBC_${GLIBC_MAX})"
+          [ "$(printf '%s\nGLIBC_%s\n' "$max" "$GLIBC_MAX" | sort -V | tail -1)" = "GLIBC_${GLIBC_MAX}" ]
+      - name: Check no build-environment paths leak into the binary
+        run: |
+          set -euo pipefail
+          f=target/release/rpi
+          n=$(strings -a "$f" | grep -E "/home/|/Users/|${GITHUB_WORKSPACE}" | grep -vc "/home/user" || true)
+          echo "$f: leaked path lines = $n"
+          if [ "$n" -gt 0 ]; then
+            strings -a "$f" | grep -E "/home/|/Users/|${GITHUB_WORKSPACE}" | grep -v "/home/user" | head -5
+            exit 1
+          fi
+      - name: Package
+        id: pkg
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then v="${GITHUB_REF_NAME}"; else v="dev-${GITHUB_SHA::7}"; fi
+          d="rpi-${v}-linux-x86_64"
+          mkdir -p "dist/$d"
+          cp target/release/rpi LICENSE README.md CHANGELOG.md "dist/$d/"
+          tar -C dist -czf "dist/$d.tar.gz" "$d"
+          (cd dist && sha256sum "$d.tar.gz" > "$d.tar.gz.sha256")
+          ls -la dist
+          echo "name=$d" >> "$GITHUB_OUTPUT"
+      - name: Smoke test the packaged binary (starts, prints help and version)
+        env:
+          PKG: ${{ steps.pkg.outputs.name }}
+        run: |
+          set -euo pipefail
+          "dist/${PKG}/rpi" --help >/dev/null
+          "dist/${PKG}/rpi" --version
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    # Tags only. A Release created here is a draft; a person publishes it.
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Attach to the release (create a draft if none exists)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # release-please (prepare-release.yml) creates the Release first, then starts this
+          # workflow on the tag. A tag pushed by hand has no Release yet, so create a draft.
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* \
+              --repo "${GITHUB_REPOSITORY}" --draft --verify-tag \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "Prebuilt Linux x86_64 binary of rpi. Verify with the .sha256 file."
+          fi

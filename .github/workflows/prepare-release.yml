@@ -1,0 +1,62 @@
+name: Prepare release
+
+# release policy: the only human step is merging the release PR.
+#  - push to main : release-please opens/updates a release PR as a draft (merge-queue only
+#                   picks up ready PRs).
+#  - release PR merged : release-please creates the tag (v<version>) and a GitHub Release, then
+#                   this job starts release.yml on that tag to attach the `rpi` binary.
+# Version bump: release-type "simple" + extra-files (release-please-config.json), not "rust".
+# The "rust" type throws "is not a package manifest (might be a cargo workspace)" on a root
+# Cargo.toml without [package] (googleapis/release-please#1998), and its cargo-workspace plugin
+# cannot handle `version.workspace = true` (googleapis/release-please#2111). extra-files sets
+# workspace.package.version in Cargo.toml and each workspace crate's entry in Cargo.lock.
+# A crate added to the workspace must also be added to extra-files: release.yml builds with
+# --locked and checks `rpi --version` against the tag, so a missed entry fails there.
+# Needs a GitHub App (vars.RELEASE_APP_CLIENT_ID + secrets.RELEASE_APP_PRIVATE_KEY). The job is
+# skipped until the variable exists: a PR opened with GITHUB_TOKEN would get no CI.
+# Not named release*.yml on purpose: the release-readiness check reads the first release*.yml
+# for C5, which must stay release.yml.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    if: vars.RELEASE_APP_CLIENT_ID != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write  # gh workflow run release.yml
+    steps:
+      - name: GitHub App token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+      - name: Release PR / tag + GitHub Release
+        id: rp
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+      - name: Build and attach the binary (release.yml on the new tag)
+        # The tag push may also start release.yml by itself; release.yml's concurrency keeps
+        # one run per tag.
+        if: steps.rp.outputs.release_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.rp.outputs.tag_name }}
+        run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"
